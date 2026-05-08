@@ -2880,6 +2880,8 @@ pub enum ParsedCondition {
     },
     /// CR 302.6: Source entered the battlefield this turn.
     SourceEnteredThisTurn,
+    /// CR 702.142a: This creature attacked this turn (Boast activation restriction).
+    SourceAttackedThisTurn,
     SourceIsCreature,
     SourceUntappedAttachedTo {
         required_type: CoreType,

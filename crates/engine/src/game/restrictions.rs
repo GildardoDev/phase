@@ -557,6 +557,10 @@ pub(crate) fn evaluate_condition(
             .get(&source_id)
             .and_then(|obj| obj.entered_battlefield_turn)
             .is_some_and(|turn| turn == state.turn_number),
+        // CR 702.142a: Boast — "activate only if this creature attacked this turn".
+        ParsedCondition::SourceAttackedThisTurn => {
+            state.creatures_attacked_this_turn.contains(&source_id)
+        }
         ParsedCondition::SourceIsCreature => state
             .objects
             .get(&source_id)

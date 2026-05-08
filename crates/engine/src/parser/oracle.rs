@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, CastingRestriction, Comparator, ContinuousModification,
-    DelayedTriggerCondition, Effect, ManaProduction, ModalChoice, QuantityExpr,
+    DelayedTriggerCondition, Effect, ManaProduction, ModalChoice, ParsedCondition, QuantityExpr,
     ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition,
     TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
@@ -564,6 +564,15 @@ fn is_spell_resolution_instruction_line(
 
     if nom_on_lower(line, &lower, |i| {
         value((), alt((tag("channel \u{2014} "), tag("channel -- ")))).parse(i)
+    })
+    .is_some()
+    {
+        return false;
+    }
+
+    // CR 702.142: Boast is a keyword ability with "Boast — Cost: Effect" structure.
+    if nom_on_lower(line, &lower, |i| {
+        value((), alt((tag("boast \u{2014} "), tag("boast -- ")))).parse(i)
     })
     .is_some()
     {
@@ -1397,6 +1406,45 @@ pub(crate) fn parse_oracle_ir(
                 }
                 // CR 601.2f: Extract self-referential cost reduction from the terminal
                 // sub_ability in the chain (it may be several levels deep).
+                extract_cost_reduction_from_chain(&mut def);
+                result.abilities.push(def);
+                i += 1;
+                continue;
+            }
+        }
+
+        // Priority 3d: Boast — "Boast — {cost}: {effect}" (CR 702.142a)
+        // Boast is a keyword ability (not an ability word per CR 207.2c) that grants
+        // an activated ability with implicit restrictions: "Activate only if this
+        // creature attacked this turn and only once each turn."
+        if let Some(((), rest_original)) = nom_on_lower(&line, &lower, |i| {
+            value((), alt((tag("boast \u{2014} "), tag("boast -- ")))).parse(i)
+        }) {
+            let rest_lower = rest_original.to_lowercase();
+            if let Some(colon_pos) = find_activated_colon(&rest_lower) {
+                let prefix_len = line.len() - rest_original.len();
+                let cost_text = line[prefix_len..prefix_len + colon_pos].trim();
+                let effect_text = line[prefix_len + colon_pos + 1..].trim();
+                let (effect_text, constraints) = strip_activated_constraints(effect_text);
+                let cost = parse_oracle_cost(cost_text);
+                ctx.subject = None;
+                ctx.actor = None;
+                let mut def =
+                    parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
+                def.cost = Some(cost);
+                def.description = Some(line.to_string());
+                if constraints.sorcery_speed() {
+                    def.sorcery_speed = true;
+                }
+                def.activation_restrictions.extend(constraints.restrictions);
+                // CR 702.142a: "Activate only if this creature attacked this turn
+                // and only once each turn."
+                def.activation_restrictions
+                    .push(ActivationRestriction::OnlyOnceEachTurn);
+                def.activation_restrictions
+                    .push(ActivationRestriction::RequiresCondition {
+                        condition: Some(ParsedCondition::SourceAttackedThisTurn),
+                    });
                 extract_cost_reduction_from_chain(&mut def);
                 result.abilities.push(def);
                 i += 1;
@@ -6748,6 +6796,104 @@ mod tests {
         assert_eq!(r.abilities.len(), 1);
         assert_eq!(r.abilities[0].kind, AbilityKind::Activated);
         assert_eq!(r.abilities[0].activation_zone, Some(Zone::Hand));
+    }
+
+    // -----------------------------------------------------------------------
+    // Boast (CR 702.142 — keyword ability)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn boast_mana_cost_parses_as_activated_with_restrictions() {
+        // CR 702.142a: Boast with mana cost — e.g. Axgard Braggart
+        let r = parse(
+            "Boast \u{2014} {1}{W}: Untap Axgard Braggart. Put a +1/+1 counter on it. (Activate only if this creature attacked this turn and only once each turn.)",
+            "Axgard Braggart",
+            &[],
+            &["Creature"],
+            &["Dwarf", "Warrior"],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        assert!(
+            ability.activation_zone.is_none(),
+            "Boast activates from battlefield (default), not hand"
+        );
+        assert!(
+            matches!(
+                ability.cost,
+                Some(AbilityCost::Composite { .. }) | Some(AbilityCost::Mana { .. })
+            ),
+            "Boast should have mana cost, got {:?}",
+            ability.cost
+        );
+        assert!(
+            ability
+                .activation_restrictions
+                .contains(&ActivationRestriction::OnlyOnceEachTurn),
+            "Boast must have OnlyOnceEachTurn restriction"
+        );
+        assert!(
+            ability.activation_restrictions.iter().any(|r| matches!(
+                r,
+                ActivationRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::SourceAttackedThisTurn)
+                }
+            )),
+            "Boast must have SourceAttackedThisTurn restriction"
+        );
+    }
+
+    #[test]
+    fn boast_text_only_cost_parses_as_activated() {
+        // CR 702.142a: Boast with sacrifice cost — Broadside Bombardiers
+        let r = parse(
+            "Boast \u{2014} Sacrifice another creature or artifact: This creature deals damage equal to 2 plus the sacrificed permanent's mana value to any target. (Activate only if this creature attacked this turn and only once each turn.)",
+            "Broadside Bombardiers",
+            &[],
+            &["Creature"],
+            &["Goblin", "Pirate"],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        assert!(
+            matches!(ability.cost, Some(AbilityCost::Sacrifice { .. })),
+            "Boast cost should be Sacrifice, got {:?}",
+            ability.cost
+        );
+        assert!(
+            ability
+                .activation_restrictions
+                .contains(&ActivationRestriction::OnlyOnceEachTurn),
+            "Boast must have OnlyOnceEachTurn restriction"
+        );
+        assert!(
+            ability.activation_restrictions.iter().any(|r| matches!(
+                r,
+                ActivationRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::SourceAttackedThisTurn)
+                }
+            )),
+            "Boast must have SourceAttackedThisTurn restriction"
+        );
+    }
+
+    #[test]
+    fn boast_double_hyphen_variant() {
+        // CR 702.142: Test double-hyphen variant
+        let r = parse(
+            "Boast -- {B}: Target opponent loses 1 life and you gain 1 life. (Activate only if this creature attacked this turn and only once each turn.)",
+            "Duskwielder",
+            &[],
+            &["Creature"],
+            &["Elf", "Berserker"],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        assert_eq!(r.abilities[0].kind, AbilityKind::Activated);
+        assert!(r.abilities[0]
+            .activation_restrictions
+            .contains(&ActivationRestriction::OnlyOnceEachTurn),);
     }
 
     #[test]
