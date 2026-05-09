@@ -16021,6 +16021,43 @@ mod tests {
     }
 
     #[test]
+    fn effect_target_enchantment_becomes_creature_with_dynamic_base_pt() {
+        let e = parse_effect(
+            "Target non-Aura enchantment you control becomes a creature in addition to its other types and has base power and base toughness each equal to its mana value",
+        );
+        let Effect::GenericEffect {
+            target: Some(TargetFilter::Typed(tf)),
+            static_abilities,
+            duration: Some(Duration::Permanent),
+        } = e
+        else {
+            panic!("expected permanent GenericEffect, got {e:?}");
+        };
+
+        assert!(tf.type_filters.contains(&TypeFilter::Enchantment));
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                "Aura".into()
+            )))));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert_eq!(static_abilities.len(), 1);
+        let mods = &static_abilities[0].modifications;
+        let expected = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Recipient,
+            },
+        };
+        assert!(mods.contains(&ContinuousModification::AddType {
+            core_type: crate::types::card_type::CoreType::Creature,
+        }));
+        assert!(mods.contains(&ContinuousModification::SetPowerDynamic {
+            value: expected.clone(),
+        }));
+        assert!(mods.contains(&ContinuousModification::SetToughnessDynamic { value: expected }));
+    }
+
+    #[test]
     fn effect_becomes_color_and_attacks_if_able_chains_requirement() {
         let def = parse_effect_chain(
             "Target creature becomes red until end of turn and attacks this turn if able.",
