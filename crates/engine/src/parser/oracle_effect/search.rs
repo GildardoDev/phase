@@ -670,6 +670,10 @@ fn parse_seek_from_top_limit(filter_text: &str) -> (&str, Option<usize>) {
 pub(super) fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetFilter {
     let type_text = search_filter_region(text).trim();
 
+    if let Some(filter) = parse_search_filter_color_disjunction(type_text, ctx) {
+        return filter;
+    }
+
     if let Some(filter) = parse_search_filter_disjunction(type_text, ctx) {
         return filter;
     }
@@ -707,6 +711,35 @@ pub(super) fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetF
     let (type_word, suffix_text) = split_search_type_word_and_suffix(clean);
 
     parse_search_filter_fallback(type_word, suffix_text, is_basic, ctx)
+}
+
+fn parse_search_filter_color_disjunction(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<TargetFilter> {
+    let (rest, first_color) = nom_primitives::parse_color.parse(text).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" or ").parse(rest).ok()?;
+    let (rest, second_color) = nom_primitives::parse_color.parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
+
+    let base_filter = parse_search_filter(rest, ctx);
+    if !search_filter_has_meaningful_content(&base_filter) {
+        return None;
+    }
+
+    let filters = [first_color, second_color]
+        .into_iter()
+        .map(|color| {
+            apply_search_suffix_constraints(
+                base_filter.clone(),
+                &SearchSuffixConstraints {
+                    properties: vec![FilterProp::HasColor { color }],
+                    type_filters: Vec::new(),
+                },
+            )
+        })
+        .collect();
+    Some(TargetFilter::Or { filters })
 }
 
 fn parse_search_filter_leading_property_stack(
@@ -2624,6 +2657,39 @@ mod tests {
             .properties
             .iter()
             .any(|property| matches!(property, FilterProp::HasColor { .. })));
+    }
+
+    #[test]
+    fn search_filter_color_disjunction_shares_type_and_suffixes() {
+        let filter = parse_search_filter(
+            "red or white instant card with mana value 4 or less",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+
+        for (filter, expected_color) in filters.iter().zip([
+            crate::types::mana::ManaColor::Red,
+            crate::types::mana::ManaColor::White,
+        ]) {
+            let TargetFilter::Typed(typed) = filter else {
+                panic!("expected typed branch, got {filter:?}");
+            };
+            assert!(typed.type_filters.contains(&TypeFilter::Instant));
+            assert!(typed
+                .properties
+                .iter()
+                .any(|property| matches!(property, FilterProp::HasColor { color } if *color == expected_color)));
+            assert!(typed.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 4 }
+                }
+            )));
+        }
     }
 
     #[test]

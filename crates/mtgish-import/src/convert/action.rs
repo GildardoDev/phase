@@ -326,6 +326,7 @@ fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExp
         | AbilityCost::RemoveCounter { .. }
         | AbilityCost::PayEnergy { .. }
         | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
         | AbilityCost::Blight { .. }

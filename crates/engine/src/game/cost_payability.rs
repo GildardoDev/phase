@@ -234,6 +234,18 @@ impl AbilityCost {
                 .len()
                     >= *count as usize
             }
+            // CR 701.3d: An explicit unattach cost is payable only while the
+            // source is an attached battlefield permanent controlled by player.
+            AbilityCost::Unattach => state.objects.get(&source).is_some_and(|obj| {
+                obj.zone == Zone::Battlefield
+                    && obj.controller == player
+                    && obj
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Equipment")
+                    && obj.attached_to.is_some()
+            }),
             // CR 701.13b: A player can mill fewer than N cards if their library
             // has fewer than N; the cost is always payable.
             AbilityCost::Mill { .. } => true,

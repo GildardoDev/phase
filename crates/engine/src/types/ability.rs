@@ -3328,6 +3328,9 @@ pub enum AbilityCost {
         #[serde(default)]
         filter: Option<TargetFilter>,
     },
+    /// CR 701.3d: Unattach this Equipment from the object it is equipping.
+    /// Used by activated costs such as Sunforger's "Unattach this Equipment".
+    Unattach,
     Mill {
         count: u32,
     },
@@ -3391,6 +3394,7 @@ pub enum CostCategory {
     PaysEnergy,
     PaysSpeed,
     ReturnsToHand,
+    Unattaches,
     Mills,
     PutsCounters,
     Reveals,
@@ -3419,6 +3423,7 @@ impl AbilityCost {
             AbilityCost::PayEnergy { .. } => vec![CostCategory::PaysEnergy],
             AbilityCost::PaySpeed { .. } => vec![CostCategory::PaysSpeed],
             AbilityCost::ReturnToHand { .. } => vec![CostCategory::ReturnsToHand],
+            AbilityCost::Unattach => vec![CostCategory::Unattaches],
             AbilityCost::Mill { .. } => vec![CostCategory::Mills],
             AbilityCost::Exert => vec![CostCategory::Exerts],
             AbilityCost::Blight { .. } => vec![CostCategory::PutsCounters],
@@ -9065,6 +9070,7 @@ mod tests {
                 target: TypedFilter::new(TypeFilter::Artifact).into(),
                 count: 1,
             },
+            AbilityCost::Unattach,
         ];
         let json = serde_json::to_string(&costs).unwrap();
         let deserialized: Vec<AbilityCost> = serde_json::from_str(&json).unwrap();
@@ -9558,6 +9564,14 @@ mod tests {
                 filter: None,
             };
             assert_eq!(cost.categories(), vec![CostCategory::ReturnsToHand]);
+        }
+
+        #[test]
+        fn unattach() {
+            assert_eq!(
+                AbilityCost::Unattach.categories(),
+                vec![CostCategory::Unattaches]
+            );
         }
 
         #[test]

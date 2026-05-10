@@ -4321,6 +4321,32 @@ pub fn pay_ability_cost(
             }
             set_speed(state, player, Some(current_speed - amount), events);
         }
+        // CR 701.3d: Explicit unattach cost. Legality is pre-gated by
+        // `AbilityCost::is_payable`; payment clears both sides of the
+        // attachment graph and keeps the Equipment on the battlefield.
+        AbilityCost::Unattach => {
+            let obj = state.objects.get(&source_id).ok_or_else(|| {
+                EngineError::InvalidAction("Source object not found for unattach cost".to_string())
+            })?;
+            if obj.zone != Zone::Battlefield
+                || obj.controller != player
+                || !obj
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|subtype| subtype == "Equipment")
+            {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot unattach: source is not a controlled battlefield Equipment".to_string(),
+                ));
+            }
+            if obj.attached_to.is_none() {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot unattach: source is not attached".to_string(),
+                ));
+            }
+            super::effects::attach::unattach(state, source_id);
+        }
         // CR 606.4: Loyalty abilities use loyalty counter adjustment as their cost.
         // Called after target selection when the ability was initiated interactively.
         // Routes through the single-authority counter resolver so replacement
@@ -14890,6 +14916,88 @@ mod tests {
                     .unwrap_or(0),
                 2,
                 "one counter removed, two remain"
+            );
+        }
+    }
+
+    mod unattach_cost {
+        use super::*;
+
+        fn attached_equipment(state: &mut GameState) -> (ObjectId, ObjectId) {
+            let equipment = create_object(
+                state,
+                CardId(940),
+                PlayerId(0),
+                "Sunforger".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&equipment).unwrap();
+                obj.card_types.core_types.push(CoreType::Artifact);
+                obj.card_types.subtypes.push("Equipment".to_string());
+            }
+            let creature = create_object(
+                state,
+                CardId(941),
+                PlayerId(0),
+                "Equipped Creature".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            crate::game::effects::attach::attach_to(state, equipment, creature);
+            (equipment, creature)
+        }
+
+        #[test]
+        fn pays_by_detaching_source_equipment() {
+            let mut state = setup_game_at_main_phase();
+            let (equipment, creature) = attached_equipment(&mut state);
+            let cost = AbilityCost::Unattach;
+
+            assert!(cost.is_payable(&state, PlayerId(0), equipment));
+            pay_ability_cost(&mut state, PlayerId(0), equipment, &cost, &mut Vec::new())
+                .expect("attached Equipment should be able to unattach as a cost");
+
+            assert_eq!(state.objects[&equipment].zone, Zone::Battlefield);
+            assert!(state.objects[&equipment].attached_to.is_none());
+            assert!(!state.objects[&creature].attachments.contains(&equipment));
+        }
+
+        #[test]
+        fn not_payable_when_source_is_unattached() {
+            let mut state = setup_game_at_main_phase();
+            let (equipment, _) = attached_equipment(&mut state);
+            crate::game::effects::attach::unattach(&mut state, equipment);
+
+            assert!(
+                !AbilityCost::Unattach.is_payable(&state, PlayerId(0), equipment),
+                "unattach cost requires an attached source permanent"
+            );
+        }
+
+        #[test]
+        fn not_payable_for_attached_non_equipment() {
+            let mut state = setup_game_at_main_phase();
+            let (equipment, creature) = attached_equipment(&mut state);
+            state
+                .objects
+                .get_mut(&equipment)
+                .unwrap()
+                .card_types
+                .subtypes
+                .retain(|subtype| subtype != "Equipment");
+
+            assert!(state.objects[&equipment].attached_to.is_some());
+            assert!(state.objects[&creature].attachments.contains(&equipment));
+            assert!(
+                !AbilityCost::Unattach.is_payable(&state, PlayerId(0), equipment),
+                "unattach cost is Equipment-only"
             );
         }
     }

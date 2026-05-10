@@ -457,6 +457,16 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         }
     }
 
+    // CR 701.3d: "Unattach this Equipment" / "Unattach ~" — explicit
+    // activation costs on Equipment such as Sunforger.
+    if nom_on_lower(text, &lower, |i| {
+        value((), alt((tag("unattach this equipment"), tag("unattach ~")))).parse(i)
+    })
+    .is_some()
+    {
+        return AbilityCost::Unattach;
+    }
+
     // "Reveal this card from your hand" — reveal self cost
     if nom_on_lower(text, &lower, |i| {
         value((), tag("reveal this card from your hand")).parse(i)
@@ -884,6 +894,15 @@ mod tests {
     #[test]
     fn cost_untap() {
         assert_eq!(parse_oracle_cost("{Q}"), AbilityCost::Untap);
+    }
+
+    #[test]
+    fn cost_unattach_this_equipment() {
+        assert_eq!(
+            parse_oracle_cost("Unattach this Equipment"),
+            AbilityCost::Unattach
+        );
+        assert_eq!(parse_oracle_cost("Unattach ~"), AbilityCost::Unattach);
     }
 
     #[test]
