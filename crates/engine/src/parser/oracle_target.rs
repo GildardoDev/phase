@@ -365,12 +365,25 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     // "the first [type phrase]" → anaphoric reference to an object identified
     // by the triggering event. Lifeline-style delayed triggers snapshot this
     // parent target while the event context is still available.
+    //
+    // CR 608.2c carve-out: "the first player" / "the second player" are
+    // cross-clause ordinal player anaphors with distinct semantics (chooser
+    // vs. chosen target — see the longest-match anaphor block below). The
+    // generic "the first [type phrase] → ParentTarget" lift would clobber
+    // both bindings, so let the player-anaphor block handle them. The check
+    // is intentionally narrow: "the first card", "the first creature", etc.
+    // continue to flow through this generic arm.
     if let Ok((rest_subject, _)) = tag::<_, _, OracleError<'_>>("the first ").parse(lower.as_str())
     {
-        let original_rest = &text[lower.len() - rest_subject.len()..];
-        let (filter, rem) = parse_type_phrase_with_ctx(original_rest, ctx);
-        if !matches!(filter, TargetFilter::Any) {
-            return (TargetFilter::ParentTarget, rem);
+        let is_player_ordinal_anaphor = tag::<_, _, OracleError<'_>>("player")
+            .parse(rest_subject)
+            .is_ok_and(|(after, _)| after.is_empty() || after.starts_with([' ', ',', '.']));
+        if !is_player_ordinal_anaphor {
+            let original_rest = &text[lower.len() - rest_subject.len()..];
+            let (filter, rem) = parse_type_phrase_with_ctx(original_rest, ctx);
+            if !matches!(filter, TargetFilter::Any) {
+                return (TargetFilter::ParentTarget, rem);
+            }
         }
     }
 
@@ -634,6 +647,21 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
             // for longest-match-first dispatch.
             value(TargetFilter::ParentTarget, tag("the permanent or player")),
             value(TargetFilter::ParentTarget, tag("the permanent")),
+            // CR 608.2c: Cross-clause ordinal player anaphors. When a prior
+            // sentence binds two distinct players via "<subject> chooses
+            // target player ...", later sentences refer to them by ordinal:
+            // "the first player" = the subject/chooser (the triggering
+            // player for upkeep triggers), "the second player" = the chosen
+            // target (the prior `TargetOnly` slot, hence ParentTargetSlot 0).
+            // Used by Oath of Mages — "that player chooses target player who
+            // has more life ... The first player may have this enchantment
+            // deal 1 damage to the second player." Placed before the bare
+            // "the player" arm so the longer phrase wins under longest-match.
+            value(TargetFilter::TriggeringPlayer, tag("the first player")),
+            value(
+                TargetFilter::ParentTargetSlot { index: 0 },
+                tag("the second player"),
+            ),
             value(TargetFilter::ParentTarget, tag("the player")),
             value(TargetFilter::ParentTarget, tag("the creature")),
             value(TargetFilter::ParentTarget, tag("the spell")),
@@ -4051,6 +4079,21 @@ mod tests {
         );
         assert_eq!(rest, "");
         assert_eq!(ctx.target_selection_mode, TargetSelectionMode::Chosen);
+    }
+
+    #[test]
+    fn first_and_second_player_cross_clause_anaphors() {
+        // CR 608.2c: "the first player" / "the second player" are cross-clause
+        // ordinal player anaphors used by Oath of Mages and similar patterns.
+        // The first player = the chooser of the prior sentence (= triggering
+        // player). The second player = the chosen target of the prior sentence
+        // (parent target slot 0).
+        let mut ctx = ParseContext::default();
+        let (f, _) = parse_target_with_ctx("the first player", &mut ctx);
+        assert_eq!(f, TargetFilter::TriggeringPlayer);
+        let mut ctx = ParseContext::default();
+        let (f, _) = parse_target_with_ctx("the second player", &mut ctx);
+        assert_eq!(f, TargetFilter::ParentTargetSlot { index: 0 });
     }
 
     #[test]

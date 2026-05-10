@@ -771,6 +771,63 @@ fn try_parse_triggered_damage_replacement(lower: &str) -> Option<Effect> {
     })
 }
 
+/// CR 614.1a + CR 514.2: Recognize a self-contained turn-bound damage-modification
+/// replacement nested inside a triggered ability's effect chain — e.g.,
+/// I Call for Slaughter's "If a source you control would deal damage this
+/// turn, it deals that much damage plus 1 instead." or Rankle and Torbran's
+/// "If a source would deal damage to a player or battle this turn, it deals
+/// that much damage plus 2 instead."
+///
+/// Distinct from `try_parse_triggered_damage_replacement`, which only handles
+/// the "that player or a permanent that player controls" target shape and
+/// hard-binds to `TargetFilter::TriggeringPlayer`. This helper covers
+/// untargeted ("any damage event matching the source filter") replacements
+/// that should be pushed to the global pending_damage_replacements as-is.
+///
+/// Delegates source/target/scope/modification extraction to the canonical
+/// `parse_replacement_line` (the same parser used for top-level static
+/// replacements on permanents), then wraps the produced `ReplacementDefinition`
+/// in an `Effect::AddTargetReplacement` with `target: TargetFilter::None`.
+/// The "this turn" temporal qualifier is captured as
+/// `expiry: Some(RestrictionExpiry::EndOfTurn)` so the cleanup step prunes
+/// the replacement at end-of-turn (CR 514.2).
+fn try_parse_global_damage_modification_replacement(text: &str) -> Option<Effect> {
+    use super::oracle_replacement::parse_replacement_line;
+    let lower = text.to_lowercase();
+    // Gate: only attempt the lift when the chunk is shaped like a damage
+    // modification replacement. The leading "if " check is a nom prefix
+    // dispatch; the `scan_contains` body checks are structural pre-filters
+    // (PATTERNS.md §5 word-boundary scan over already-classified clause
+    // text) — the actual parse is delegated to `parse_replacement_line`
+    // below, which uses nom combinators end-to-end.
+    if tag::<_, _, OracleError<'_>>("if ")
+        .parse(lower.as_str())
+        .is_err()
+    {
+        return None;
+    }
+    if !nom_primitives::scan_contains(&lower, "would deal")
+        || !nom_primitives::scan_contains(&lower, "this turn")
+        || !nom_primitives::scan_contains(&lower, "instead")
+    {
+        return None;
+    }
+    let mut replacement = parse_replacement_line(text, "")?;
+    // Only lift damage-modification replacements — other shapes (zone
+    // redirection, life-gain replacements, etc.) have different runtime
+    // semantics and aren't covered by this lift.
+    replacement.damage_modification.as_ref()?;
+    // The originating sentence carries "this turn" — bind the replacement's
+    // lifetime to end-of-turn so it expires after the current turn (CR 514.2).
+    if replacement.expiry.is_none() {
+        replacement.expiry = Some(RestrictionExpiry::EndOfTurn);
+    }
+    Some(Effect::AddTargetReplacement {
+        replacement: Box::new(replacement),
+        target: TargetFilter::None,
+    })
+}
+
 fn try_parse_next_time_source_damage_replacement(lower: &str) -> Option<Effect> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("the next time ")
         .parse(lower)
@@ -1733,6 +1790,13 @@ fn try_parse_have_causative(
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     // Pattern A: "have it deal N damage to them" / "have ~ deal N damage to them"
+    //
+    // Strictly gated to the implicit-recipient form ("to them" / "to that
+    // player") because the broader "have ~ deal N damage to <X>" pattern is
+    // handled by `try_parse_have_redirection` downstream, which preserves the
+    // explicit recipient (e.g., Oath of Mages — "have ~ deal 1 damage to the
+    // second player" must reach the anaphor-target arm, not collapse to
+    // `target: Player`).
     let after_have = nom_on_lower(tp.original, tp.lower, |input| {
         value((), alt((tag("have it "), tag("have ~ ")))).parse(input)
     });
@@ -1745,12 +1809,28 @@ fn try_parse_have_causative(
         })
         .map(|(_, r)| TextPair::new(r, &rest.lower[rest.lower.len() - r.len()..]))
         {
-            if let Some((amount, _)) = super::oracle_util::parse_count_expr(after_deal.lower) {
-                return Some(parsed_clause(Effect::DealDamage {
-                    amount,
-                    target: TargetFilter::Player,
-                    damage_source: None,
-                }));
+            if let Some((amount, after_count_lower)) =
+                super::oracle_util::parse_count_expr(after_deal.lower)
+            {
+                // After the count, require a "damage to {them|that player}"
+                // tail — anything else is an explicit recipient that must
+                // flow through the general redirection path.
+                let after_damage = after_count_lower
+                    .strip_prefix("damage to ") // allow-noncombinator: structural tail check on classified count remainder
+                    .unwrap_or("");
+                let recipient_implicit = after_damage
+                    .trim_end_matches('.')
+                    .trim_end_matches(',')
+                    .trim()
+                    .eq("them")
+                    || after_damage.trim_end_matches('.').trim().eq("that player");
+                if recipient_implicit {
+                    return Some(parsed_clause(Effect::DealDamage {
+                        amount,
+                        target: TargetFilter::Player,
+                        damage_source: None,
+                    }));
+                }
             }
         }
         // CR 611.2b: When the specific causative "deal damage" pattern does
@@ -2044,6 +2124,15 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
     if let Some(effect) = try_parse_next_time_source_damage_replacement(&lower) {
+        return parsed_clause(effect);
+    }
+    // CR 614.1a + CR 514.2: Global "If [source] would deal damage this turn,
+    // it deals that much damage plus N instead" pattern (Rankle and Torbran,
+    // I Call for Slaughter). Distinct from the targeted "If a source would
+    // deal damage to that player..." form above — this lifts the entire
+    // replacement to the global pending_damage_replacements with no per-target
+    // binding.
+    if let Some(effect) = try_parse_global_damage_modification_replacement(text) {
         return parsed_clause(effect);
     }
 
@@ -10426,6 +10515,15 @@ fn strip_optional_effect_prefix(
                 tag("any opponent may "),
             ),
             value((None, None), tag("you may ")),
+            // CR 608.2c: "the first player may" — Oath of Mages and analogous
+            // cross-clause patterns where the chooser of a prior sentence
+            // (= TriggeringPlayer for upkeep/event triggers) is invited to
+            // take an optional action in a later sentence. Marks the chunk
+            // optional and scopes the actor to the triggering player.
+            value(
+                (None, Some(PlayerFilter::TriggeringPlayer)),
+                tag("the first player may "),
+            ),
         ))
         .parse(input)
     }) {

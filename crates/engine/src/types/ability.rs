@@ -4724,6 +4724,16 @@ pub enum Effect {
     /// damage replacements after context references are resolved.
     /// Cleanup at end-of-turn relies on `expiry: Some(RestrictionExpiry::EndOfTurn)`
     /// on the carried definition (CR 514.2).
+    ///
+    /// `target: TargetFilter::None` is the "no per-target binding" mode for
+    /// self-contained turn-bound replacements (Rankle and Torbran's "If a
+    /// source would deal damage to a player or battle this turn, it deals
+    /// that much damage plus 2 instead.", I Call for Slaughter's "If a
+    /// source you control would deal damage this turn, it deals that much
+    /// damage plus 1 instead."). The carried `ReplacementDefinition`
+    /// already constrains its own source/target/scope filters, so the
+    /// resolver pushes it directly to `pending_damage_replacements` with
+    /// no per-target inference of `damage_target_filter`.
     AddTargetReplacement {
         replacement: Box<ReplacementDefinition>,
         #[serde(default = "default_target_filter_any")]
