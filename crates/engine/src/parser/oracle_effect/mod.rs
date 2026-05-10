@@ -5061,7 +5061,10 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
 
     // If the remainder contains anaphoric references ("it", "that creature", "them"),
     // replace the sub_effect's target with ParentTarget so it inherits the parent's targets.
-    if uses_parent_target_reference {
+    // CR 608.2k carve-out (issue #319): in typed-trigger-subject context the
+    // pronoun has already been correctly resolved to TriggeringSource by
+    // `resolve_pronoun_target` — preserve that binding instead of clobbering.
+    if uses_parent_target_reference && !ctx_has_typed_trigger_subject(ctx) {
         replace_target_with_parent(&mut sub_clause.effect);
     }
 
@@ -5617,8 +5620,10 @@ fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<Parse
 
     // If the remainder contains anaphoric references ("it", "that creature", "them"),
     // replace the sub_effect's target with ParentTarget so it inherits the parent's targets.
+    // CR 608.2k carve-out (issue #319): preserve TriggeringSource bindings
+    // produced by `resolve_pronoun_target` in typed-trigger-subject context.
     let sub_lower = sub_text.to_lowercase();
-    if has_anaphoric_reference(&sub_lower) {
+    if has_anaphoric_reference(&sub_lower) && !ctx_has_typed_trigger_subject(ctx) {
         replace_target_with_parent(&mut sub_clause.effect);
     }
 
@@ -5977,6 +5982,22 @@ fn replace_target_with_parent(effect: &mut Effect) {
             // ParentTarget is handled by the sub_ability chain's target propagation.
         }
     }
+}
+
+/// CR 608.2k (issue #319): True when `ctx` carries a *typed* trigger subject
+/// (a non-source object the trigger condition explicitly named, e.g.
+/// `Typed{Subtype:Elf}` from "Whenever an Elf you control dies"). In this
+/// context, bare pronouns "it"/"them"/etc. correctly resolve to
+/// `TriggeringSource` via `resolve_pronoun_target` — the chunk-level
+/// `replace_target_with_parent` rewriter must NOT clobber them back to
+/// `ParentTarget`. SelfRef/Any/None subjects fall through to the legacy
+/// rewrite path so spell-context anaphors (Dispatch, kicker-instead chains)
+/// still inherit the parent target.
+fn ctx_has_typed_trigger_subject(ctx: &ParseContext) -> bool {
+    matches!(
+        &ctx.subject,
+        Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any)
+    )
 }
 
 fn replace_fight_subject_with_parent_if_anaphoric_subject(
@@ -9122,13 +9143,20 @@ pub(crate) fn parse_effect_chain_ir(
         // Anaphoric resolution: parse-time pronoun→parent-target rewrites.
         // These modify the parsed effect based on text analysis and previous
         // clause context — parse-time work that belongs in IR production.
+        // CR 608.2k carve-out (issue #319): in typed-trigger-subject context,
+        // bare pronouns have already been correctly bound to TriggeringSource by
+        // `resolve_pronoun_target` — preserve that binding so cards like
+        // Ancestral Katana ("Whenever a Samurai or Warrior … attach ~ to it")
+        // attach to the triggering creature, not the parent target.
         let text_lower = text.to_lowercase();
+        let typed_trigger_subject = ctx_has_typed_trigger_subject(ctx);
         // Kicker clauses referencing "that creature"/"it" inherit the parent's target.
         if condition.is_some()
             && !condition.as_ref().is_some_and(condition_refs_source_object)
             && !clauses.is_empty()
             && has_anaphoric_reference(&text_lower)
             && !matches!(if_you_do_anchor, Some(TargetFilter::SelfRef))
+            && !typed_trigger_subject
             && !replace_fight_subject_with_parent_if_anaphoric_subject(
                 &text_lower,
                 &mut clause.effect,
@@ -9142,6 +9170,7 @@ pub(crate) fn parse_effect_chain_ir(
                 prev.condition.is_some() && has_typed_target(&prev.parsed.effect)
             })
             && has_anaphoric_reference(&text_lower)
+            && !typed_trigger_subject
             && !replace_fight_subject_with_parent_if_anaphoric_subject(
                 &text_lower,
                 &mut clause.effect,
@@ -9155,6 +9184,7 @@ pub(crate) fn parse_effect_chain_ir(
                 prev.condition.is_none() && has_typed_target(&prev.parsed.effect)
             })
             && has_anaphoric_reference(&text_lower)
+            && !typed_trigger_subject
             && !replace_fight_subject_with_parent_if_anaphoric_subject(
                 &text_lower,
                 &mut clause.effect,

@@ -18,6 +18,7 @@ use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
+use super::oracle_effect::{is_bare_object_pronoun, resolve_it_pronoun};
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_nom::error::OracleError;
@@ -43,6 +44,49 @@ where
     let (rest, result) = parser(lower).ok()?;
     let consumed = lower.len() - rest.len();
     Some((result, &text[consumed..]))
+}
+
+/// CR 608.2c + CR 608.2k: Resolve a bare object pronoun ("it", "them", "him",
+/// "her") to the correct anaphor binding based on parser context.
+///
+/// Two anaphor classes apply to bare object pronouns:
+///
+/// 1. **Trigger-subject anaphor** (CR 608.2k): the pronoun refers to the
+///    object matched by the triggering event ("Whenever an Elf you control
+///    dies, exile it"). Activated only when `ctx.subject` is a *typed* (or
+///    `AttachedTo`) filter — i.e. a non-source object the trigger condition
+///    explicitly named. Routes via `resolve_it_pronoun` → `TriggeringSource`.
+///    Issue #319 (Serpent's Soul-Jar): without this routing, "exile it"
+///    incorrectly bound to the Jar instead of the dying Elf.
+///
+/// 2. **Compound-effect parent-target anaphor** (CR 608.2c): the pronoun
+///    refers back to a target selected earlier in the same instruction
+///    sequence ("Tap target creature. It doesn't untap"; "When ~ enters, choose
+///    a target creature. Exile it"). Activated when `ctx.subject` is `None`,
+///    `SelfRef`, or `Any` — these contexts do not introduce a non-source
+///    triggering object, so the only valid antecedent is the parent ability's
+///    selected target. Returns `ParentTarget`.
+///
+/// The discriminator is *whether the trigger subject introduces a non-source
+/// object*, not *whether a subject exists*. Self-ETB triggers (`SelfRef`
+/// subject) and player-actor triggers (`Any` subject) must keep
+/// `ParentTarget` so cards like Agrus Kos ("Whenever ~ enters, choose target
+/// creature. Exile it") continue to exile the chosen creature, not the source.
+///
+/// `pronoun` is accepted only for diagnostic clarity at call sites; the
+/// resolution itself is uniform across the bare object pronoun family per
+/// `is_bare_object_pronoun`.
+pub(crate) fn resolve_pronoun_target(ctx: &mut ParseContext, pronoun: &str) -> TargetFilter {
+    debug_assert!(
+        is_bare_object_pronoun(pronoun),
+        "resolve_pronoun_target called with non-pronoun token: {pronoun}"
+    );
+    match &ctx.subject {
+        Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
+            resolve_it_pronoun(ctx)
+        }
+        _ => TargetFilter::ParentTarget,
+    }
 }
 
 /// Parse a word with a word boundary check: the next char after the word must be
@@ -291,15 +335,15 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         }
     }
 
-    // CR 608.2c: Bare anaphoric references inherit the parent target selected earlier
-    // in the same spell/ability instruction sequence.
-    // "it" with word boundary — prevents matching "item", "iterate", etc.
+    // CR 608.2c + CR 608.2k: Bare anaphoric object pronouns ("it", "them", "him",
+    // "her") refer back to a previously-mentioned object. `resolve_pronoun_target`
+    // dispatches on `ctx.subject` to pick the correct antecedent class — see its
+    // doc comment for the typed-subject vs. compound-anaphor split.
     if let Some((_, rest)) = nom_on_lower(text, &lower, |input| parse_word_bounded(input, "it")) {
-        return (TargetFilter::ParentTarget, rest);
+        return (resolve_pronoun_target(ctx, "it"), rest);
     }
-    // "them" with word boundary
     if let Some((_, rest)) = nom_on_lower(text, &lower, |input| parse_word_bounded(input, "them")) {
-        return (TargetFilter::ParentTarget, rest);
+        return (resolve_pronoun_target(ctx, "them"), rest);
     }
     if tag::<_, _, OracleError<'_>>("one of ")
         .parse(lower.as_str())
@@ -308,15 +352,18 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         if let Some((_, rest)) =
             nom_on_lower(text, &lower, |input| parse_word_bounded(input, "one"))
         {
+            // "one" is a quantity word, not an object pronoun — preserve the
+            // legacy `ParentTarget` binding (multi-target chains).
             return (TargetFilter::ParentTarget, rest);
         }
     }
-    // Gendered object pronouns also refer back to the prior selected object.
+    // Gendered object pronouns follow the same trigger-subject vs. compound
+    // anaphor dispatch as "it"/"them".
     if let Some((_, rest)) = nom_on_lower(text, &lower, |input| parse_word_bounded(input, "him")) {
-        return (TargetFilter::ParentTarget, rest);
+        return (resolve_pronoun_target(ctx, "him"), rest);
     }
     if let Some((_, rest)) = nom_on_lower(text, &lower, |input| parse_word_bounded(input, "her")) {
-        return (TargetFilter::ParentTarget, rest);
+        return (resolve_pronoun_target(ctx, "her"), rest);
     }
     if let Some((filter, rest)) = nom_on_lower(text, &lower, |input| {
         alt((
@@ -4268,6 +4315,106 @@ mod tests {
         let (f, rest) = parse_target("one into your hand");
         assert_eq!(f, TargetFilter::ParentTarget);
         assert_eq!(rest, " into your hand");
+    }
+
+    // CR 608.2k regression — issue #319 (Serpent's Soul-Jar)
+    //
+    // "Whenever an Elf you control dies, exile it" was emitting
+    // `Effect::ChangeZone { target: ParentTarget }` for the bare "it"
+    // pronoun, which resolved to the ability source (the Jar) rather
+    // than the dying Elf. With a typed trigger subject on the parse
+    // context, "it" must bind to `TriggeringSource` so the dying creature
+    // is the exile subject.
+    #[test]
+    fn bare_it_with_typed_trigger_subject_binds_to_triggering_source() {
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .subtype("Elf".into()),
+            )),
+            ..Default::default()
+        };
+        let (f, rest) = parse_target_with_ctx("it", &mut ctx);
+        assert_eq!(f, TargetFilter::TriggeringSource);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn bare_them_with_typed_trigger_subject_binds_to_triggering_source() {
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            )),
+            ..Default::default()
+        };
+        let (f, rest) = parse_target_with_ctx("them", &mut ctx);
+        assert_eq!(f, TargetFilter::TriggeringSource);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn bare_him_with_typed_trigger_subject_binds_to_triggering_source() {
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            )),
+            ..Default::default()
+        };
+        let (f, rest) = parse_target_with_ctx("him", &mut ctx);
+        assert_eq!(f, TargetFilter::TriggeringSource);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn bare_it_with_attached_to_subject_binds_to_triggering_source() {
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::AttachedTo),
+            ..Default::default()
+        };
+        let (f, rest) = parse_target_with_ctx("it", &mut ctx);
+        assert_eq!(f, TargetFilter::TriggeringSource);
+        assert_eq!(rest, "");
+    }
+
+    // Self-ETB triggers ("When ~ enters, choose target creature. Exile it") —
+    // subject is `SelfRef`, so the only valid antecedent for "it" in a
+    // compound effect is the parent ability's selected target. Preserve
+    // `ParentTarget` so cards like Agrus Kos exile the chosen creature, not
+    // the source. The pronoun does NOT bind to the source via `SelfRef` here.
+    #[test]
+    fn bare_it_with_self_ref_subject_preserves_parent_target() {
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..Default::default()
+        };
+        let (f, rest) = parse_target_with_ctx("it", &mut ctx);
+        assert_eq!(f, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    // Player-actor triggers ("Whenever a player attacks, do X to it") — `Any`
+    // subject. Same as SelfRef: preserve `ParentTarget`.
+    #[test]
+    fn bare_it_with_any_subject_preserves_parent_target() {
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::Any),
+            ..Default::default()
+        };
+        let (f, rest) = parse_target_with_ctx("it", &mut ctx);
+        assert_eq!(f, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    // Compound spell/activated effects with no trigger subject
+    // ("Tap target creature. It doesn't untap") — preserve the legacy
+    // `ParentTarget` binding so the parent-ability target chain handles it.
+    #[test]
+    fn bare_it_without_trigger_subject_preserves_parent_target() {
+        let mut ctx = ParseContext::default();
+        let (f, rest) = parse_target_with_ctx("it", &mut ctx);
+        assert_eq!(f, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
     }
 
     #[test]

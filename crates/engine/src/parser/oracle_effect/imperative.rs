@@ -36,7 +36,9 @@ use crate::types::player::PlayerCounterKind;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
-use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
+use super::super::oracle_target::{
+    parse_target, parse_target_with_ctx, parse_type_phrase, resolve_pronoun_target,
+};
 use super::super::oracle_util::{
     contains_object_pronoun, contains_possessive, parse_count_expr, parse_mana_symbols,
     parse_ordinal, split_around, starts_with_possessive, strip_after, TextPair,
@@ -2177,6 +2179,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
 pub(super) fn parse_utility_imperative_ast(
     text: &str,
     lower: &str,
+    ctx: &mut ParseContext,
 ) -> Option<UtilityImperativeAst> {
     // Simple verb dispatch: prevent, regenerate, copy
     if let Some((verb, rest)) = nom_on_lower(text, lower, |input| {
@@ -2204,16 +2207,18 @@ pub(super) fn parse_utility_imperative_ast(
         };
     }
     // CR 701.27 + CR 701.28: "transform" and "convert" are equivalent game actions.
-    // CR 608.2k: bare object pronoun "it" / "itself" inside a self-trigger sub-ability
-    // refers to the trigger source — Primal Amulet's "remove those counters and transform
-    // it" is the canonical case. The literal-match list covers every form that resolves
-    // to `SelfRef`; the dynamic `parse_target` fallback below picks up explicit targets.
+    // CR 608.2k: the bare-pronoun and self-deictic arms ("transform it" /
+    // "transform itself" / "transform this creature") split into two anaphor
+    // classes:
+    //   • Self-deictic ("~"/"this <type>") always binds to the source.
+    //   • Bare object pronoun ("it"/"itself") binds via `resolve_it_pronoun`,
+    //     which returns `TriggeringSource` when the parse context carries a
+    //     non-self trigger subject (Serpent's Soul-Jar pattern, issue #319),
+    //     and `SelfRef` otherwise (Primal Amulet self-trigger).
     if matches!(
         lower,
         "transform"
             | "transform ~"
-            | "transform it"
-            | "transform itself"
             | "transform this"
             | "transform this creature"
             | "transform this permanent"
@@ -2221,8 +2226,6 @@ pub(super) fn parse_utility_imperative_ast(
             | "transform this land"
             | "convert"
             | "convert ~"
-            | "convert it"
-            | "convert itself"
             | "convert this"
             | "convert this creature"
             | "convert this permanent"
@@ -2233,10 +2236,27 @@ pub(super) fn parse_utility_imperative_ast(
             target: TargetFilter::SelfRef,
         });
     }
+    if matches!(
+        lower,
+        "transform it" | "transform itself" | "convert it" | "convert itself"
+    ) {
+        // CR 608.2k: bare object pronoun resolves via the same dispatch as
+        // exile/destroy — typed trigger subject → TriggeringSource (Werewolf
+        // packs class), self-ref/any/none → ParentTarget (Primal Amulet's
+        // self-trigger preserves source via the empty-targets fallback at
+        // CR 608.2c). The diagnostic-only pronoun arg is uniform across the
+        // bare object pronoun family per `is_bare_object_pronoun`.
+        return Some(UtilityImperativeAst::Transform {
+            target: resolve_pronoun_target(ctx, "it"),
+        });
+    }
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
         value((), alt((tag("transform "), tag("convert ")))).parse(input)
     }) {
-        let (target, _) = parse_target(rest);
+        // CR 608.2k: thread `ctx` so dynamic targets like "transform that
+        // creature" / "transform target permanent" resolve anaphors via the
+        // same trigger-subject machinery.
+        let (target, _) = parse_target_with_ctx(rest, ctx);
         if !matches!(target, TargetFilter::Any) {
             return Some(UtilityImperativeAst::Transform { target });
         }
@@ -2270,7 +2290,7 @@ pub(super) fn parse_utility_imperative_ast(
     {
         if rem.trim().is_empty() {
             let (attachment, _attachment_rem) = parse_target(&attachment_text);
-            let (target, _target_rem) = parse_attach_recipient(&target_text);
+            let (target, _target_rem) = parse_attach_recipient(&target_text, ctx);
             #[cfg(debug_assertions)]
             assert_no_compound_remainder(_attachment_rem, text);
             #[cfg(debug_assertions)]
@@ -2283,7 +2303,8 @@ pub(super) fn parse_utility_imperative_ast(
     {
         let tp = TextPair::new(text, lower);
         let after_to = tp.strip_after(" to ").map(|tp| tp.original).unwrap_or(rest);
-        let (target, _rem) = parse_target(after_to);
+        // CR 608.2k: same anaphor dispatch as the explicit-attach arm above.
+        let (target, _rem) = parse_target_with_ctx(after_to, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         return Some(UtilityImperativeAst::Attach {
@@ -2311,8 +2332,13 @@ fn parse_explicit_targeted_attach(
     Ok((input, (attachment.to_string(), target.to_string())))
 }
 
-fn parse_attach_recipient(text: &str) -> (TargetFilter, &str) {
-    let (target, rest) = parse_target(text);
+fn parse_attach_recipient<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFilter, &'a str) {
+    // CR 608.2k: thread `ctx` so "attach this Equipment to it" in trigger
+    // bodies binds "it" to the triggering subject (Ancestral Katana —
+    // "Whenever a Samurai or Warrior you control attacks alone … attach this
+    // Equipment to it"). Pre-existing "her" / "him" → SelfRef carve-out is
+    // preserved for legacy attach-to-self phrasings (e.g. "attach to her").
+    let (target, rest) = parse_target_with_ctx(text, ctx);
     if matches!(target, TargetFilter::ParentTarget) {
         let trimmed = text.trim_start();
         let lower = trimmed.to_lowercase();
@@ -3342,14 +3368,20 @@ fn lower_change_zone_all_to_library(origins: Vec<Zone>) -> ParsedEffectClause {
     clause
 }
 
-pub(super) fn parse_destroy_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
+pub(super) fn parse_destroy_ast(
+    text: &str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ZoneCounterImperativeAst> {
     if nom_on_lower(text, lower, |input| {
         value((), alt((tag("destroy all "), tag("destroy each ")))).parse(input)
     })
     .is_some()
     {
         let (_, rest) = nom_on_lower(text, lower, |input| value((), tag("destroy ")).parse(input))?;
-        let (target, _rem) = parse_target(rest);
+        // CR 608.2k: thread `ctx` so bare "it"/"them" anaphors bind to the
+        // triggering subject ("Whenever a creature dies, destroy it" class).
+        let (target, _rem) = parse_target_with_ctx(rest, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         return Some(ZoneCounterImperativeAst::Destroy { target, all: true });
@@ -3357,7 +3389,8 @@ pub(super) fn parse_destroy_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |input| value((), tag("destroy ")).parse(input))
     {
-        let (target, _rem) = parse_target(rest);
+        // CR 608.2k: see comment above — anaphor binding via parse_target_with_ctx.
+        let (target, _rem) = parse_target_with_ctx(rest, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         return Some(ZoneCounterImperativeAst::Destroy { target, all: false });
@@ -3387,7 +3420,7 @@ fn starts_with_target_possessive_zone(rest_lower: &str) -> bool {
 pub(super) fn parse_exile_ast(
     text: &str,
     lower: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<ZoneCounterImperativeAst> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exile the top ").parse(lower) {
         let (count, remainder) = if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest) {
@@ -3489,7 +3522,11 @@ pub(super) fn parse_exile_ast(
         }
     }
 
-    let (parsed_target, _rem) = parse_target(rest_text);
+    // CR 608.2k: thread `ctx` through so bare "it"/"them" anaphors in trigger
+    // bodies ("Whenever an Elf you control dies, exile it") bind to the
+    // triggering subject via `resolve_pronoun_target`, not the ability source.
+    // Issue #319: Serpent's Soul-Jar exiled itself instead of the dying Elf.
+    let (parsed_target, _rem) = parse_target_with_ctx(rest_text, ctx);
     #[cfg(debug_assertions)]
     assert_no_compound_remainder(_rem, text);
     // CR 701.5a: "exile target spell" must constrain targeting to the stack,
@@ -3982,12 +4019,12 @@ pub(super) fn parse_imperative_family_ast(
 
         // Utility verbs (CR 615, CR 701.19, CR 701.6, CR 613.4d)
         "prevent" | "regenerate" | "copy" | "attach" | "switch" => {
-            parse_utility_imperative_ast(text, lower)
+            parse_utility_imperative_ast(text, lower, ctx)
                 .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Utility(ast)))
         }
         // CR 701.27 + CR 701.28: "transform" and "convert" are equivalent game actions.
         "transform" | "transforms" | "convert" | "converts" => {
-            parse_utility_imperative_ast(text, lower)
+            parse_utility_imperative_ast(text, lower, ctx)
                 .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Utility(ast)))
         }
 
@@ -5107,7 +5144,7 @@ pub(super) fn parse_zone_counter_ast(
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<ZoneCounterImperativeAst> {
-    if let Some(ast) = parse_destroy_ast(text, lower) {
+    if let Some(ast) = parse_destroy_ast(text, lower, ctx) {
         return Some(ast);
     }
     if let Some(ast) = parse_exile_ast(text, lower, ctx) {
@@ -5574,11 +5611,14 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 mod tests {
     use super::*;
 
-    /// CR 701.27 + CR 608.2k: "transform it" / "convert itself" — bare object
-    /// pronoun resolves to the trigger source. Building-block coverage for the
-    /// full SelfRef pronoun surface so all DFC self-transform sub-abilities
-    /// (Primal Amulet class) reach the Transform handler instead of falling
-    /// through to Unimplemented.
+    /// CR 701.27 + CR 608.2c + CR 608.2k: "transform it" / "convert itself" —
+    /// bare object pronoun resolves to `ParentTarget` when no trigger subject
+    /// is set on the parse context. At resolution time, `ParentTarget` with
+    /// empty `ability.targets` falls back to the source per CR 608.2c
+    /// (`targeting::resolved_targets`), so DFC self-transform sub-abilities
+    /// (Primal Amulet class) still target the source. The trigger-subject
+    /// anaphor case (typed subject → `TriggeringSource`) is exercised at the
+    /// `parse_target_with_ctx` layer in `oracle_target` tests.
     #[test]
     fn parse_transform_self_pronouns() {
         for input in [
@@ -5587,13 +5627,13 @@ mod tests {
             "convert it",
             "convert itself",
         ] {
-            let result = parse_utility_imperative_ast(input, input);
+            let result = parse_utility_imperative_ast(input, input, &mut ParseContext::default());
             let Some(UtilityImperativeAst::Transform { target }) = result else {
                 panic!("{input}: expected Transform, got {result:?}");
             };
             assert!(
-                matches!(target, TargetFilter::SelfRef),
-                "{input}: target SelfRef, got {target:?}"
+                matches!(target, TargetFilter::ParentTarget),
+                "{input}: expected ParentTarget, got {target:?}"
             );
         }
     }
@@ -5601,7 +5641,7 @@ mod tests {
     #[test]
     fn parse_attach_triggering_object_to_last_created_token() {
         let input = "attach it to the token";
-        let result = parse_utility_imperative_ast(input, input);
+        let result = parse_utility_imperative_ast(input, input, &mut ParseContext::default());
         let Some(UtilityImperativeAst::Attach { attachment, target }) = result else {
             panic!("{input}: expected Attach, got {result:?}");
         };
@@ -5613,7 +5653,7 @@ mod tests {
     fn parse_attach_target_equipment_to_self_pronoun() {
         let input = "attach up to one target Equipment you control to her";
         let lower = input.to_lowercase();
-        let result = parse_utility_imperative_ast(input, &lower);
+        let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
         let Some(UtilityImperativeAst::Attach { attachment, target }) = result else {
             panic!("{input}: expected Attach, got {result:?}");
         };
@@ -5632,7 +5672,7 @@ mod tests {
     fn parse_attach_target_equipment_to_target_creature() {
         let input = "attach target Equipment you control to target creature you control";
         let lower = input.to_lowercase();
-        let result = parse_utility_imperative_ast(input, &lower);
+        let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
         let Some(UtilityImperativeAst::Attach { attachment, target }) = result else {
             panic!("{input}: expected Attach, got {result:?}");
         };
@@ -5648,6 +5688,43 @@ mod tests {
             target,
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
         );
+    }
+
+    /// CR 608.2k regression — issue #319 sibling.
+    /// "attach ~ to it" inside a typed-subject trigger ("Whenever a Samurai
+    /// or Warrior you control attacks alone … attach this Equipment to it"
+    /// — Ancestral Katana) must bind "it" to the triggering creature, not
+    /// the parent ability target. Verifies the ctx-threaded attach path.
+    #[test]
+    fn parse_attach_self_to_it_in_typed_trigger_binds_triggering_source() {
+        for input in ["attach ~ to it", "attach this equipment to it"] {
+            let mut ctx = ParseContext {
+                subject: Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .controller(ControllerRef::You)
+                                .subtype("Samurai".to_string()),
+                        ),
+                        TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .controller(ControllerRef::You)
+                                .subtype("Warrior".to_string()),
+                        ),
+                    ],
+                }),
+                ..Default::default()
+            };
+            let result = parse_utility_imperative_ast(input, input, &mut ctx);
+            let Some(UtilityImperativeAst::Attach {
+                attachment: _,
+                target,
+            }) = result
+            else {
+                panic!("{input}: expected Attach, got {result:?}");
+            };
+            assert_eq!(target, TargetFilter::TriggeringSource, "{input}");
+        }
     }
 
     #[test]
