@@ -20,6 +20,7 @@ mod json_smoke_test;
 mod kaito_integration;
 mod madame_null_integration;
 mod master_of_ceremonies;
+mod mystic_forge_regression;
 mod oracle_parser;
 mod riot_control_regression;
 mod ripples_of_undeath_regression;
