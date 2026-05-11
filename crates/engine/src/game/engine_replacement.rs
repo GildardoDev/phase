@@ -528,7 +528,50 @@ pub(super) fn apply_pending_post_replacement_effect(
     };
     state.post_replacement_event_source = None;
     state.post_replacement_event_target = None;
+    // CR 614.12a + CR 707.9: When the post-effect pauses on `CopyTargetChoice`,
+    // the entering object's battlefield-entry `ZoneChanged` event is already
+    // in `events` (emitted by the prior `move_to_zone`). `BecomeCopy` and its
+    // `GrantTrigger` modifications haven't been applied yet, so a trigger
+    // scan over that event right now would miss every granted ETB (Callidus
+    // Assassin's destroy-same-name). Defer the event into
+    // `state.deferred_entry_events`; `handle_copy_target_choice` replays it
+    // after `BecomeCopy` resolves and layers re-evaluate. Captured at the
+    // single producer site so both the stack-resolution path (non-optional
+    // copy replacements) and the `handle_replacement_choice` path (optional
+    // "you may have this enter as a copy" replacements) defer uniformly.
+    capture_deferred_entry_events_if_copy_target_choice(state, waiting_for.as_ref(), events);
     waiting_for
+}
+
+/// CR 614.12a + CR 707.9: If `waiting_for` is `CopyTargetChoice`, clone any
+/// battlefield-entry `ZoneChanged` events for the entering source into
+/// `state.deferred_entry_events`. The original `events` vec is preserved so
+/// the frontend animates the entry as soon as the spell resolves; the deferred
+/// copy is replayed through `process_triggers` / `check_delayed_triggers` once
+/// `BecomeCopy` resolves in `handle_copy_target_choice`.
+///
+/// Defense in depth: clears any stale events from a prior `CopyTargetChoice`
+/// that exited abnormally (concede mid-choice, eliminate_player, error return
+/// before drain) so the replay never fires triggers against a phantom object.
+fn capture_deferred_entry_events_if_copy_target_choice(
+    state: &mut GameState,
+    waiting_for: Option<&WaitingFor>,
+    events: &[GameEvent],
+) {
+    let Some(WaitingFor::CopyTargetChoice { source_id, .. }) = waiting_for else {
+        return;
+    };
+    let source_id = *source_id;
+    state.deferred_entry_events.clear();
+    for event in events {
+        if matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, to, .. }
+                if *object_id == source_id && *to == Zone::Battlefield
+        ) {
+            state.deferred_entry_events.push(event.clone());
+        }
+    }
 }
 
 fn apply_post_replacement_resolved_effect(
@@ -1400,5 +1443,206 @@ mod tests {
         }
         assert!(state.legacy_post_replacement_effect.is_none());
         assert!(state.legacy_post_replacement_resolved_effect.is_none());
+    }
+
+    /// CR 614.12a + CR 707.9 + CR 603.2: Drive Callidus Assassin's full path —
+    /// optional "enter as a copy" replacement → accept → mid-entry copy
+    /// target choice → pick target → granted "destroy same-name" trigger
+    /// fires. Regression coverage for the case where the entering object's
+    /// `ZoneChanged` event was emitted *before* `BecomeCopy` could push the
+    /// granted trigger onto `trigger_definitions`, so a naive trigger scan
+    /// at entry time silently dropped the trigger. The capture inside
+    /// `apply_pending_post_replacement_effect` defers the event into
+    /// `state.deferred_entry_events`; `handle_copy_target_choice` replays
+    /// it after `BecomeCopy` resolves + layers re-evaluate.
+    #[test]
+    fn callidus_optional_copy_replacement_fires_granted_destroy_trigger_end_to_end() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ContinuousModification, Effect, FilterProp,
+            TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+        };
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Opponent's Bear — serves as both the copy source AND the destroy
+        // target. After Callidus becomes a copy of it, the granted trigger's
+        // `Another + SameName` filter selects "another creature named Bear",
+        // which is the only candidate (the copy itself is `Another`-excluded).
+        let bear = make_creature(&mut state, PlayerId(1), "Bear");
+        {
+            let obj = state.objects.get_mut(&bear).unwrap();
+            obj.base_name = "Bear".to_string();
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        // Callidus Assassin enters via an Optional `Moved` replacement that
+        // executes `BecomeCopy` with `GrantTrigger(destroy SameName)` — the
+        // shape the parser produces for Polymorphine. Tap-wrapping (the real
+        // card's "enter tapped as a copy") is structurally orthogonal here;
+        // `first_non_modifier_ability` walks past Tap to find BecomeCopy, so
+        // exercising BecomeCopy directly tests the same code path.
+        let granted_trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Creature)
+                            .properties(vec![FilterProp::Another, FilterProp::SameName]),
+                    ),
+                    cant_regenerate: false,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            .destination(Zone::Battlefield);
+
+        let callidus = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Callidus Assassin".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&callidus).unwrap();
+            obj.base_name = "Callidus Assassin".to_string();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(3);
+            obj.base_toughness = Some(3);
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+            obj.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    // CR 614.12: A replacement on a card entering the
+                    // battlefield (i.e. evaluated while the card is still
+                    // on the stack) is only considered when its
+                    // `valid_card` is `SelfRef`. `find_applicable_replacements`
+                    // enforces this at `replacement.rs:2058-2062`. Polymorphine
+                    // is a self-replacement on the entering card, so the
+                    // parser sets `SelfRef` automatically; the test must
+                    // mirror that wiring.
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination_zone(Zone::Battlefield)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::BecomeCopy {
+                            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                            duration: None,
+                            mana_value_limit: None,
+                            additional_modifications: vec![ContinuousModification::GrantTrigger {
+                                trigger: Box::new(granted_trigger.clone()),
+                            }],
+                        },
+                    )),
+            );
+        }
+
+        // Propose the Stack→Battlefield ZoneChange so the replacement
+        // pipeline surfaces the optional choice.
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::ZoneChange {
+            object_id: callidus,
+            from: Zone::Stack,
+            to: Zone::Battlefield,
+            cause: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            controller_override: None,
+            enter_transformed: false,
+            applied: std::collections::HashSet::new(),
+        };
+        let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice (Polymorphine is optional), got {result:?}");
+        };
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
+        state.priority_player = player;
+
+        // ── Accept Polymorphine ────────────────────────────────────────────
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept Polymorphine");
+
+        // Post-accept invariants — these are what the prior fix attempts
+        // missed:
+        //
+        // 1. `state.waiting_for == CopyTargetChoice` (the choice surfaces)
+        // 2. `state.deferred_entry_events` contains the freshly-emitted
+        //    `ZoneChanged` (the producer-site capture worked)
+        // 3. The granted trigger is NOT yet on the entering object —
+        //    `BecomeCopy` hasn't resolved
+        let WaitingFor::CopyTargetChoice {
+            source_id,
+            valid_targets,
+            ..
+        } = state.waiting_for.clone()
+        else {
+            panic!(
+                "expected CopyTargetChoice after accepting Polymorphine, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(source_id, callidus);
+        assert!(
+            valid_targets.contains(&bear),
+            "opponent's Bear must be a valid copy target"
+        );
+        assert_eq!(
+            state.deferred_entry_events.len(),
+            1,
+            "Callidus's battlefield-entry ZoneChanged must be deferred for replay"
+        );
+        assert!(matches!(
+            state.deferred_entry_events[0],
+            GameEvent::ZoneChanged { object_id, to, .. }
+                if object_id == callidus && to == Zone::Battlefield
+        ));
+
+        // ── Pick Bear as the copy target ───────────────────────────────────
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(crate::types::ability::TargetRef::Object(bear)),
+            },
+        )
+        .expect("pick copy target");
+
+        // Post-copy invariants:
+        //
+        // 1. Callidus's name now matches Bear (copy applied)
+        // 2. The granted trigger landed on `trigger_definitions`
+        // 3. The deferred event was drained
+        // 4. The destroy trigger fired — it either sits in `pending_trigger`
+        //    awaiting target selection or is already on the stack
+        let copy = &state.objects[&callidus];
+        assert_eq!(copy.name, "Bear", "BecomeCopy must overwrite name");
+        assert!(
+            copy.trigger_definitions
+                .iter_all()
+                .any(|t| t == &granted_trigger),
+            "GrantTrigger must place the destroy-trigger on the copy"
+        );
+        assert!(
+            state.deferred_entry_events.is_empty(),
+            "deferred entry events must be drained after copy choice resolves"
+        );
+        let trigger_fired = state.pending_trigger.is_some()
+            || state.stack.iter().any(|entry| {
+                matches!(
+                    entry.kind,
+                    crate::types::game_state::StackEntryKind::TriggeredAbility {
+                        source_id: trig_source,
+                        ..
+                    } if trig_source == callidus
+                )
+            });
+        assert!(
+            trigger_fired,
+            "Callidus's granted destroy-same-name trigger must fire from the deferred entry replay"
+        );
     }
 }
