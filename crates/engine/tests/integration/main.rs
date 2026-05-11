@@ -26,6 +26,7 @@ mod ripples_of_undeath_regression;
 mod rules;
 mod swans_prevention_followup;
 mod tempt_with_discovery;
+mod timely_ward_regression;
 mod treasured_find_regression;
 mod ureni_attack_trigger;
 mod urzas_saga_chapter_two;

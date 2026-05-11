@@ -945,6 +945,28 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     origin_zone: Zone,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 601.3d + CR 702.8a: When the cast was authorized as-though-it-had-flash
+    // via a target-dependent `SpellCastingOption.condition`, re-validate
+    // against the just-committed targets BEFORE any additional cost (sacrifice,
+    // discard, pay-life) is paid. Timely Ward — "you may cast this spell as
+    // though it had flash if it targets a commander" — must fail the cast
+    // before any cost is committed if the chosen targets do not satisfy the
+    // gating condition; otherwise the player would forfeit additional-cost
+    // resources for an illegal cast. We perform the same check again at
+    // `finalize_cast_with_phyrexian_choices` so the canonical terminus is
+    // closed even for flows that bypass this entry point.
+    if cast_timing_permission == Some(CastTimingPermission::AsThoughHadFlash)
+        && !super::restrictions::target_dependent_flash_permission_satisfied(
+            state, player, object_id, &ability,
+        )
+    {
+        let pending_for_cancel = PendingCast::new(object_id, card_id, ability, cost.clone());
+        super::casting::handle_cancel_cast(state, &pending_for_cancel, events);
+        return Err(EngineError::ActionNotAllowed(
+            "Chosen targets do not satisfy the flash casting condition".to_string(),
+        ));
+    }
+
     // CR 207.2c + CR 601.2f: Strive per-target cost increase.
     // Targets are chosen in CR 601.2c; costs are determined in CR 601.2f.
     // Add strive_cost * (num_targets - 1) to the total casting cost.
@@ -1907,6 +1929,29 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 601.3d + CR 702.8a: When the cast was authorized as-though-it-had-flash
+    // via a `SpellCastingOption` whose `condition` is target-dependent (e.g.,
+    // Timely Ward — "you may cast this spell as though it had flash if it
+    // targets a commander"), the condition could not be evaluated at the
+    // announcement-time `flash_timing_cost` check because targets weren't yet
+    // chosen. Now that the player has committed targets (and any cascade
+    // resulting-MV constraint will be evaluated below before payment), we can
+    // authoritatively re-validate: at least one `AsThoughHadFlash` option's
+    // condition (or a real Flash keyword) must authorize the cast. If none do,
+    // the cast is illegal under CR 601.3d — abort by popping the stack entry
+    // and surface the error to the caller.
+    if cast_timing_permission == Some(CastTimingPermission::AsThoughHadFlash)
+        && !super::restrictions::target_dependent_flash_permission_satisfied(
+            state, player, object_id, &ability,
+        )
+    {
+        let pending_for_cancel = PendingCast::new(object_id, card_id, ability, cost.clone());
+        super::casting::handle_cancel_cast(state, &pending_for_cancel, events);
+        return Err(EngineError::ActionNotAllowed(
+            "Chosen targets do not satisfy the flash casting condition".to_string(),
+        ));
+    }
+
     // CR 702.85a: Evaluate the cascade resulting-MV constraint BEFORE mana is
     // paid. By this point the player has chosen X (CR 601.2b runs at
     // `enter_payment_step`/`ChooseXValue`), so `ability.chosen_x` reflects the

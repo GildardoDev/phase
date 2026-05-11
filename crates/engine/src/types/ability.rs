@@ -3307,6 +3307,21 @@ pub enum ParsedCondition {
     },
     /// CR 702.131a: True when the activating player has the city's blessing.
     HasCityBlessing,
+    /// CR 601.3d + CR 702.8a + CR 608.2c: The in-flight spell being cast targets at
+    /// least one object that matches `filter`. Gates a target-dependent casting
+    /// permission (Timely Ward — "you may cast this spell as though it had flash if
+    /// it targets a commander") on the spell's chosen targets. Evaluated against the
+    /// `state.pending_cast.ability`'s flattened targets when targets have been
+    /// committed; before target selection the condition reads as "not yet refutable"
+    /// so the cast may be announced and proceed to target selection. Final
+    /// validation runs at `finish_pending_cast_cost_or_pay` against the committed
+    /// targets. The structural analogue at ability-resolution time is
+    /// `AbilityCondition::TargetMatchesFilter` (CR 608.2c); this variant occupies
+    /// the casting/restriction layer (CR 601.3d) the same way the rest of
+    /// `ParsedCondition` does.
+    SpellTargetsFilter {
+        filter: TargetFilter,
+    },
     // -- Combinators --
     /// CR 601.3 / CR 602.5: All inner conditions must be true. Used for compound
     /// casting/activation restrictions like "Cast this spell only if you control a

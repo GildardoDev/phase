@@ -625,7 +625,7 @@ fn object_type_names(obj: &crate::game::game_object::GameObject) -> Vec<String> 
     names
 }
 
-fn effective_spell_keyword_kinds(
+pub(crate) fn effective_spell_keyword_kinds(
     state: &GameState,
     caster: PlayerId,
     object_id: ObjectId,
