@@ -3444,6 +3444,13 @@ fn record_graveyard_play_permission(
     }
 }
 
+fn record_exile_play_permission(state: &mut GameState, source: Option<ObjectId>) {
+    let Some(source_id) = source else {
+        return;
+    };
+    state.exile_play_permissions_used.insert(source_id);
+}
+
 fn handle_play_land(
     state: &mut GameState,
     object_id: ObjectId,
@@ -3507,10 +3514,23 @@ fn handle_play_land(
     let in_library_with_permission =
         super::casting::top_of_library_land_playable_by_permission(state, player)
             .is_some_and(|(top_id, _)| top_id == object_id);
+    let exile_permission_source = if state.exile.contains(&object_id) {
+        super::casting::exile_lands_playable_by_permission(state, player)
+            .iter()
+            .find(|(obj_id, _)| *obj_id == object_id)
+            .map(|(_, source_id)| *source_id)
+    } else {
+        None
+    };
+    let in_exile_with_permission = exile_permission_source.is_some();
 
-    if !in_hand && !in_graveyard_with_permission && !in_library_with_permission {
+    if !in_hand
+        && !in_graveyard_with_permission
+        && !in_library_with_permission
+        && !in_exile_with_permission
+    {
         return Err(EngineError::InvalidAction(
-            "Card not found in hand, graveyard, or library with play permission".to_string(),
+            "Card not found in hand, graveyard, exile, or library with play permission".to_string(),
         ));
     }
     if !state
@@ -3601,6 +3621,8 @@ fn handle_play_land(
         Zone::Hand
     } else if in_graveyard_with_permission {
         Zone::Graveyard
+    } else if in_exile_with_permission {
+        Zone::Exile
     } else {
         // CR 401.5: in_library_with_permission — the card moves Library → Battlefield.
         Zone::Library
@@ -3692,6 +3714,7 @@ fn handle_play_land(
                 {
                     state.lands_played_this_turn += 1;
                     record_graveyard_play_permission(state, gy_permission_source, object_id);
+                    record_exile_play_permission(state, exile_permission_source);
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
                         p.lands_played_this_turn += 1;
                     }
@@ -3718,6 +3741,7 @@ fn handle_play_land(
             state.lands_played_this_turn += 1;
             // CR 604.2: Record once-per-turn graveyard play permission usage.
             record_graveyard_play_permission(state, gy_permission_source, object_id);
+            record_exile_play_permission(state, exile_permission_source);
             if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
                 p.lands_played_this_turn += 1;
             }
@@ -3739,6 +3763,7 @@ fn handle_play_land(
     state.lands_played_this_turn += 1;
     // CR 604.2: Record once-per-turn graveyard play permission usage.
     record_graveyard_play_permission(state, gy_permission_source, object_id);
+    record_exile_play_permission(state, exile_permission_source);
     let player_data = state
         .players
         .iter_mut()
