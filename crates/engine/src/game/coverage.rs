@@ -290,6 +290,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::OriginalController => "original controller".into(),
         TargetFilter::ScopedPlayer => "scoped player".into(),
         TargetFilter::SelfRef => "self".into(),
+        TargetFilter::SourceOrPaired => "source or paired creature".into(),
         TargetFilter::StackAbility => "ability on stack".into(),
         TargetFilter::StackSpell => "spell on stack".into(),
         TargetFilter::AttachedTo => "attached permanent".into(),
@@ -393,6 +394,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::EquippedBy => parts.push("equipped by self".into()),
             FilterProp::AttachedToSource => parts.push("attached to self".into()),
             FilterProp::AttachedToRecipient => parts.push("attached to it".into()),
+            FilterProp::Unpaired => parts.push("unpaired".into()),
             FilterProp::HasAttachment { kind, controller } => {
                 let kind_s = match kind {
                     crate::types::ability::AttachmentKind::Aura => "aura",
@@ -1997,7 +1999,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Tribute { count } => {
             d.push(("count".into(), count.to_string()));
         }
-        Effect::BecomePrepared { target } | Effect::BecomeUnprepared { target } => {
+        Effect::BecomePrepared { target }
+        | Effect::BecomeUnprepared { target }
+        | Effect::PairWith { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
         // Effects with no interesting parameters
@@ -4930,6 +4934,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceIsMonstrous => ("SourceIsMonstrous", Unhandled),
         StaticCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Unhandled),
         StaticCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Unhandled),
+        StaticCondition::SourceIsPaired => ("SourceIsPaired", Handled),
         StaticCondition::SourceInZone { .. } => ("SourceInZone", Unhandled),
         StaticCondition::EnchantedIsFaceDown => ("EnchantedIsFaceDown", Handled),
     }

@@ -256,6 +256,12 @@ pub struct GameObject {
     /// `None` if unattached. See `AttachTarget` for variants.
     pub attached_to: Option<AttachTarget>,
     pub attachments: Vec<ObjectId>,
+    /// CR 702.95b-d: Soulbond pair relationship. Pairing is symmetric:
+    /// if `A.paired_with == Some(B)`, then `B.paired_with == Some(A)`.
+    /// This is independent from attachments; paired creatures are not
+    /// attached to each other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paired_with: Option<ObjectId>,
 
     // Counters
     pub counters: HashMap<CounterType, u32>,
@@ -704,6 +710,7 @@ impl GameObject {
             dealt_deathtouch_damage: false,
             attached_to: None,
             attachments: Vec::new(),
+            paired_with: None,
             counters: HashMap::new(),
             name: name.clone(),
             power: None,
@@ -834,6 +841,7 @@ impl GameObject {
         // state. Assign when WotC publishes SOS CR update.
         self.prepared = None;
         self.is_saddled = false;
+        self.paired_with = None;
         self.chosen_attributes.clear();
         self.cast_variant_paid = None;
         self.cast_timing_permission = None;

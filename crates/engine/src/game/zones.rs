@@ -162,6 +162,7 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
     // Prune host-bound transient effects and clean up mana-tap tracking
     // when a permanent leaves the battlefield.
     if from == Zone::Battlefield {
+        super::pairing::break_pair(state, object_id);
         state.layers_dirty = true;
         super::layers::prune_host_left_effects(state, object_id);
         super::layers::prune_affected_object_left_effects(state, object_id);

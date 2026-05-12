@@ -1502,6 +1502,7 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsPaired
         | StaticCondition::SourceIsMonstrous
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::OpponentPoisonAtLeast { .. }

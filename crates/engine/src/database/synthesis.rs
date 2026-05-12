@@ -130,6 +130,7 @@ impl KeywordTriggerInstaller {
                 "M1M1", "-1/-1", "702.79a",
             )],
             Keyword::Annihilator(n) => vec![build_annihilator_trigger(*n)],
+            Keyword::Soulbond => build_soulbond_triggers(),
             _ => Vec::new(),
         }
     }
@@ -144,6 +145,7 @@ impl KeywordTriggerInstaller {
                 is_dies_return_with_counter_trigger(trigger, &CounterType::Minus1Minus1)
             }
             Keyword::Annihilator(_) => is_annihilator_attack_trigger(trigger),
+            Keyword::Soulbond => is_soulbond_trigger(trigger),
             _ => false,
         }
     }
@@ -1521,6 +1523,78 @@ pub fn synthesize_annihilator(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Annihilator(_)));
 }
 
+/// CR 702.95a: Soulbond represents two optional triggered abilities. One fires
+/// when the soulbond creature enters and targets another unpaired creature you
+/// control; the other fires when another unpaired creature you control enters
+/// and pairs it with the soulbond source.
+pub fn synthesize_soulbond(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Soulbond));
+}
+
+fn unpaired_creature_you_control() -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .properties(vec![FilterProp::Unpaired]),
+    )
+}
+
+fn another_unpaired_creature_you_control() -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .properties(vec![FilterProp::Another, FilterProp::Unpaired]),
+    )
+}
+
+fn build_soulbond_triggers() -> Vec<TriggerDefinition> {
+    let source_unpaired = TriggerCondition::SourceMatchesFilter {
+        filter: unpaired_creature_you_control(),
+    };
+    let pair_target = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PairWith {
+            target: another_unpaired_creature_you_control(),
+        },
+    )
+    .optional();
+    let pair_triggering = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PairWith {
+            target: TargetFilter::TriggeringSource,
+        },
+    )
+    .optional();
+
+    vec![
+        TriggerDefinition::new(TriggerMode::ChangesZone)
+            .valid_card(TargetFilter::SelfRef)
+            .destination(Zone::Battlefield)
+            .condition(source_unpaired.clone())
+            .execute(pair_target)
+            .description(
+                "CR 702.95a: When this creature enters, you may pair it with another unpaired creature you control.".to_string(),
+            ),
+        TriggerDefinition::new(TriggerMode::ChangesZone)
+            .valid_card(another_unpaired_creature_you_control())
+            .destination(Zone::Battlefield)
+            .condition(source_unpaired)
+            .execute(pair_triggering)
+            .description(
+                "CR 702.95a: Whenever another unpaired creature you control enters, you may pair it with this creature.".to_string(),
+            ),
+    ]
+}
+
+fn is_soulbond_trigger(trigger: &TriggerDefinition) -> bool {
+    if trigger.mode != TriggerMode::ChangesZone || trigger.destination != Some(Zone::Battlefield) {
+        return false;
+    }
+    trigger.execute.as_ref().is_some_and(|ability| {
+        matches!(ability.effect.as_ref(), Effect::PairWith { .. }) && ability.optional
+    })
+}
+
 /// Idempotency-shape predicate for `synthesize_annihilator`. True iff `trigger`
 /// is the synthesized Annihilator attack-trigger shape (`TriggerMode::Attacks`
 /// with `valid_card = SelfRef` and execute body `Effect::Sacrifice` over a
@@ -2357,6 +2431,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // separately. Defending player resolved per-attacker via
     // `ControllerRef::DefendingPlayer` (CR 508.5 / 508.5a).
     synthesize_annihilator(face);
+    // CR 702.95a: Soulbond — two optional ETB triggers that create pair
+    // relationships under the resolution checks in CR 702.95c-d.
+    synthesize_soulbond(face);
     // CR 702.43a + CR 702.43b: Modular N — ETB-with-N-P1P1 replacement plus a
     // dies-trigger transferring counters (LKI-counted) to a target artifact
     // creature. Each instance functions independently.

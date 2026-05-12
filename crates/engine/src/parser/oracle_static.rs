@@ -507,6 +507,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         return Some(def);
     }
 
+    if let Some(def) = parse_soulbond_paired_static(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 611.3a: An inverted static of the form "As long as <condition>, <effect>"
     // is semantically equivalent to the canonical "<effect> as long as <condition>".
     // Rewrite to canonical form and re-dispatch so the existing conditional-continuous
@@ -3329,6 +3333,41 @@ fn parse_conditional_static(text: &str) -> Option<StaticDefinition> {
     Some(def)
 }
 
+fn parse_soulbond_paired_static(tp: &TextPair<'_>, description: &str) -> Option<StaticDefinition> {
+    let parser = preceded(
+        tag("as long as "),
+        preceded(
+            terminated(parse_soulbond_paired_condition_nom, tag(", ")),
+            preceded(
+                alt((tag("each of those creatures "), tag("both creatures "))),
+                alt((terminated(take_until("."), tag(".")), rest)),
+            ),
+        ),
+    );
+    let (_, predicate) = all_consuming(parser).parse(tp.lower).ok()?;
+    let mut def = parse_continuous_gets_has(predicate, TargetFilter::SourceOrPaired, description)?;
+    def.condition = Some(StaticCondition::SourceIsPaired);
+    Some(def)
+}
+
+fn matches_soulbond_paired_condition(condition_text: &str) -> bool {
+    all_consuming(parse_soulbond_paired_condition_nom)
+        .parse(condition_text)
+        .is_ok()
+}
+
+fn parse_soulbond_paired_condition_nom(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("~ is paired with another creature"),
+            tag("this creature is paired with another creature"),
+            tag("it is paired with another creature"),
+        )),
+    )
+    .parse(input)
+}
+
 /// Parse a condition clause (the text between "As long as" and the comma).
 ///
 /// Returns a typed `StaticCondition` for known patterns, or `None` if the
@@ -3381,6 +3420,10 @@ fn parse_static_condition(text: &str) -> Option<StaticCondition> {
     // noun phrases like "artifacts and creatures".
     if let Some(condition) = try_split_compound_and(text) {
         return Some(condition);
+    }
+
+    if matches_soulbond_paired_condition(tp.lower) {
+        return Some(StaticCondition::SourceIsPaired);
     }
 
     // "you have at least N life more than your starting life total"

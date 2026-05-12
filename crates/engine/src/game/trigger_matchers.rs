@@ -543,6 +543,7 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::Owner => false,
         TargetFilter::Any
         | TargetFilter::SelfRef
+        | TargetFilter::SourceOrPaired
         | TargetFilter::Typed(_)
         | TargetFilter::Not { .. }
         | TargetFilter::Or { .. }

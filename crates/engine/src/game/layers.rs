@@ -382,6 +382,10 @@ pub(crate) fn evaluate_condition(
             filter,
             &FilterContext::from_source(state, source_id),
         ),
+        StaticCondition::SourceIsPaired => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|obj| obj.paired_with.is_some()),
         // CR 509.1b: True when the defending player controls a permanent matching the filter.
         // Only meaningful during combat — finds the defending player from the source's
         // attacker info in the CombatState.
@@ -583,6 +587,9 @@ pub fn evaluate_layers(state: &mut GameState) {
         if *layer == Layer::Type {
             apply_intrinsic_basic_land_mana_abilities(state, &bf_ids);
         }
+        if matches!(*layer, Layer::Control | Layer::Type) {
+            super::pairing::cleanup_invalid_pairs(state);
+        }
     }
 
     // CR 702.73a: Changeling — object has all creature types.
@@ -684,6 +691,8 @@ pub fn evaluate_layers(state: &mut GameState) {
             }
         }
     }
+
+    super::pairing::cleanup_invalid_pairs(state);
 
     // Step 5: Clear dirty flag
     state.layers_dirty = false;

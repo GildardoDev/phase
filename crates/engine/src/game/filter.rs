@@ -449,6 +449,11 @@ fn filter_inner_for_object(
         TargetFilter::OriginalController => false,
         TargetFilter::ScopedPlayer => false, // ScopedPlayer is a player, not an object
         TargetFilter::SelfRef => object_id == source_id,
+        TargetFilter::SourceOrPaired => state
+            .objects
+            .get(&source_id)
+            .and_then(|source| source.paired_with)
+            .is_some_and(|paired| object_id == source_id || object_id == paired),
         TargetFilter::Typed(TypedFilter {
             type_filters,
             controller,
@@ -730,6 +735,7 @@ fn zone_change_filter_inner(
         TargetFilter::OriginalController => false,
         TargetFilter::ScopedPlayer => false,
         TargetFilter::SelfRef => record.object_id == source_id,
+        TargetFilter::SourceOrPaired => false,
         TargetFilter::Typed(TypedFilter {
             type_filters,
             controller,
@@ -1060,6 +1066,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::OriginalController
         | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
+        | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
@@ -1265,6 +1272,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::OriginalController
         | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
+        | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
@@ -1483,6 +1491,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::Another
+        | FilterProp::Unpaired
         | FilterProp::OtherThanTriggerObject
         | FilterProp::PowerLE { .. }
         | FilterProp::PowerGE { .. }
@@ -1962,6 +1971,8 @@ fn matches_filter_prop(
         // CR 613.4c: In per-recipient layer contexts, "other" is relative to
         // the affected object. Outside those contexts, it remains source-relative.
         FilterProp::Another => object_id != source.recipient_id.unwrap_or(source.id),
+        // CR 702.95b: An unpaired creature is one that is not paired.
+        FilterProp::Unpaired => obj.paired_with.is_none(),
         // CR 603.4 + CR 109.3: `OtherThanTriggerObject` is a typed marker that
         // signals "exclude the triggering object" for count semantics. The
         // exclusion is applied at the `QuantityRef::ObjectCount` resolver level
@@ -2389,6 +2400,14 @@ fn zone_change_record_matches_property(
                     )
             })
         }
+        // CR 702.95b: Pairing exists only between battlefield creatures. For
+        // a battlefield zone-change event, consult the live object after entry
+        // so Soulbond's "another unpaired creature enters" trigger can see the
+        // entering creature before any pair-forming effect resolves.
+        FilterProp::Unpaired => state
+            .objects
+            .get(&record.object_id)
+            .is_some_and(|obj| obj.paired_with.is_none()),
 
         // These predicates query live battlefield state (tap status, attachment,
         // current counters, face-down). The snapshot has already left its public

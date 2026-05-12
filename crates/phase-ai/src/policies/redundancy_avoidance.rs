@@ -343,6 +343,10 @@ fn redundancy_delta(
         // CR 702.xxx: Prepare (Strixhaven) — no redundancy detection.
         | Effect::BecomePrepared { .. }
         | Effect::BecomeUnprepared { .. }
+        // CR 702.95c-d: PairWith mutates the source/target pair relationship;
+        // redundancy depends on trigger timing and revalidation, so this policy
+        // leaves it to the resolver.
+        | Effect::PairWith { .. }
         // CR 702.94a: MiracleCast is an internal engine trigger effect — no redundancy.
         | Effect::MiracleCast { .. }
         // CR 702.35a: MadnessCast is an internal engine trigger effect — no redundancy.

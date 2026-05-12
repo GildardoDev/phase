@@ -2763,15 +2763,17 @@ pub mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, AggregateFunction, Comparator, ContinuousModification,
-        ControllerRef, DelayedTriggerCondition, Effect, FilterProp, GainLifePlayer, KickerVariant,
-        MultiTargetSpec, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality,
-        SharedQualityRelation, StaticDefinition, TargetFilter, TargetRef, TriggerCondition,
-        TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+        ControllerRef, DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer,
+        KickerVariant, MultiTargetSpec, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility,
+        SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter,
+        TargetRef, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
     };
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
     use crate::types::game_state::{
-        DelayedTrigger, GameState, SpellCastRecord, StackEntry, StackEntryKind, ZoneChangeRecord,
+        DelayedTrigger, GameState, SpellCastRecord, StackEntry, StackEntryKind, WaitingFor,
+        ZoneChangeRecord,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::{Keyword, KeywordKind};
@@ -2808,6 +2810,290 @@ pub mod tests {
                 ..ZoneChangeRecord::test_minimal(object_id, Some(from), to)
             }),
         }
+    }
+
+    fn make_creature(
+        state: &mut GameState,
+        player: PlayerId,
+        name: &str,
+        power: i32,
+        toughness: i32,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.base_power = Some(power);
+        obj.base_toughness = Some(toughness);
+        obj.power = Some(power);
+        obj.toughness = Some(toughness);
+        id
+    }
+
+    fn make_soulbond_creature(state: &mut GameState, player: PlayerId, name: &str) -> ObjectId {
+        let id = make_creature(state, player, name, 2, 2);
+        let triggers =
+            crate::database::synthesis::KeywordTriggerInstaller::triggers_for(&Keyword::Soulbond);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.keywords.push(Keyword::Soulbond);
+        obj.base_keywords.push(Keyword::Soulbond);
+        for trigger in &triggers {
+            obj.trigger_definitions.push(trigger.clone());
+        }
+        std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).extend(triggers);
+        id
+    }
+
+    fn add_wolfir_static(state: &mut GameState, source: ObjectId) {
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::SourceOrPaired)
+            .condition(StaticCondition::SourceIsPaired)
+            .modifications(vec![
+                ContinuousModification::AddPower { value: 4 },
+                ContinuousModification::AddToughness { value: 4 },
+            ]);
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.static_definitions.push(static_def.clone());
+        std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(static_def);
+    }
+
+    fn begin_trigger_target_selection(state: &mut GameState) {
+        let wf = crate::game::engine::begin_pending_trigger_target_selection(state)
+            .expect("begin selection")
+            .expect("selection needed");
+        state.waiting_for = wf;
+    }
+
+    fn resolve_stack_to_optional_choice(state: &mut GameState) {
+        for _ in 0..20 {
+            if matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }) {
+                return;
+            }
+            assert!(!state.stack.is_empty(), "expected pending stack object");
+            crate::game::engine::apply_as_current(state, GameAction::PassPriority)
+                .expect("pass priority");
+        }
+        panic!("stack did not reach OptionalEffectChoice");
+    }
+
+    fn accept_optional_effect(state: &mut GameState) {
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "expected OptionalEffectChoice, got {:?}",
+            state.waiting_for
+        );
+        crate::game::engine::apply_as_current(
+            state,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("accept optional effect");
+    }
+
+    fn resolve_stack_fully(state: &mut GameState) {
+        for _ in 0..20 {
+            if state.stack.is_empty() {
+                return;
+            }
+            crate::game::engine::apply_as_current(state, GameAction::PassPriority)
+                .expect("pass priority");
+            if matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }) {
+                accept_optional_effect(state);
+            }
+        }
+        panic!("stack did not resolve");
+    }
+
+    fn select_soulbond_target_and_accept(state: &mut GameState, target: ObjectId) {
+        begin_trigger_target_selection(state);
+        assert!(
+            matches!(state.waiting_for, WaitingFor::TriggerTargetSelection { .. }),
+            "expected TriggerTargetSelection, got {:?}",
+            state.waiting_for
+        );
+        crate::game::engine::apply_as_current(
+            state,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(target)],
+            },
+        )
+        .expect("select soulbond target");
+        resolve_stack_to_optional_choice(state);
+        accept_optional_effect(state);
+    }
+
+    #[test]
+    fn soulbond_source_enters_pairs_with_selected_unpaired_creature() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let source = make_soulbond_creature(&mut state, PlayerId(0), "Soulbond Source");
+        let chosen = make_creature(&mut state, PlayerId(0), "Chosen Partner", 1, 1);
+        let _other = make_creature(&mut state, PlayerId(0), "Other Partner", 1, 1);
+
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                source,
+                Zone::Stack,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                vec![],
+            )],
+        );
+
+        select_soulbond_target_and_accept(&mut state, chosen);
+
+        assert_eq!(state.objects[&source].paired_with, Some(chosen));
+        assert_eq!(state.objects[&chosen].paired_with, Some(source));
+    }
+
+    #[test]
+    fn soulbond_other_creature_enters_pairs_with_source() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let source = make_soulbond_creature(&mut state, PlayerId(0), "Soulbond Source");
+        let entrant = make_creature(&mut state, PlayerId(0), "New Partner", 1, 1);
+
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                entrant,
+                Zone::Stack,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                vec![],
+            )],
+        );
+        resolve_stack_to_optional_choice(&mut state);
+        accept_optional_effect(&mut state);
+
+        assert_eq!(state.objects[&source].paired_with, Some(entrant));
+        assert_eq!(state.objects[&entrant].paired_with, Some(source));
+    }
+
+    #[test]
+    fn soulbond_paired_static_applies_to_both_and_ends_when_pair_breaks() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let source = make_soulbond_creature(&mut state, PlayerId(0), "Wolfir Test");
+        add_wolfir_static(&mut state, source);
+        let partner = make_creature(&mut state, PlayerId(0), "Partner", 1, 1);
+
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                source,
+                Zone::Stack,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                vec![],
+            )],
+        );
+        resolve_stack_to_optional_choice(&mut state);
+        accept_optional_effect(&mut state);
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(state.objects[&source].power, Some(6));
+        assert_eq!(state.objects[&source].toughness, Some(6));
+        assert_eq!(state.objects[&partner].power, Some(5));
+        assert_eq!(state.objects[&partner].toughness, Some(5));
+
+        crate::game::pairing::break_pair(&mut state, source);
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(state.objects[&source].power, Some(2));
+        assert_eq!(state.objects[&source].toughness, Some(2));
+        assert_eq!(state.objects[&partner].power, Some(1));
+        assert_eq!(state.objects[&partner].toughness, Some(1));
+    }
+
+    #[test]
+    fn soulbond_pair_breaks_on_leave_control_change_and_stops_being_creature() {
+        let mut state = setup();
+        let a = make_creature(&mut state, PlayerId(0), "A", 2, 2);
+        let b = make_creature(&mut state, PlayerId(0), "B", 2, 2);
+        crate::game::pairing::pair_objects(&mut state, a, b);
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, a, Zone::Graveyard, &mut events);
+        assert_eq!(state.objects[&b].paired_with, None);
+
+        let c = make_creature(&mut state, PlayerId(0), "C", 2, 2);
+        let d = make_creature(&mut state, PlayerId(0), "D", 2, 2);
+        crate::game::pairing::pair_objects(&mut state, c, d);
+        state.add_transient_continuous_effect(
+            ObjectId(9000),
+            PlayerId(1),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: d },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+        crate::game::layers::evaluate_layers(&mut state);
+        assert_eq!(state.objects[&c].paired_with, None);
+        assert_eq!(state.objects[&d].paired_with, None);
+
+        let e = make_creature(&mut state, PlayerId(0), "E", 2, 2);
+        let f = make_creature(&mut state, PlayerId(0), "F", 2, 2);
+        crate::game::pairing::pair_objects(&mut state, e, f);
+        state
+            .objects
+            .get_mut(&f)
+            .unwrap()
+            .card_types
+            .core_types
+            .retain(|ty| *ty != CoreType::Creature);
+        crate::game::pairing::cleanup_invalid_pairs(&mut state);
+        assert_eq!(state.objects[&e].paired_with, None);
+        assert_eq!(state.objects[&f].paired_with, None);
+    }
+
+    #[test]
+    fn soulbond_invalid_resolution_does_not_pair() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let source = make_soulbond_creature(&mut state, PlayerId(0), "Soulbond Source");
+        let chosen = make_creature(&mut state, PlayerId(0), "Chosen Partner", 1, 1);
+        let _other = make_creature(&mut state, PlayerId(0), "Other Partner", 1, 1);
+
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                source,
+                Zone::Stack,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                vec![],
+            )],
+        );
+        begin_trigger_target_selection(&mut state);
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(chosen)],
+            },
+        )
+        .expect("select soulbond target");
+        state
+            .objects
+            .get_mut(&chosen)
+            .unwrap()
+            .card_types
+            .core_types
+            .retain(|ty| *ty != CoreType::Creature);
+        resolve_stack_fully(&mut state);
+
+        assert_eq!(state.objects[&source].paired_with, None);
+        assert_eq!(state.objects[&chosen].paired_with, None);
     }
 
     /// CR 111.1 + CR 603.6a: Helper for token creation events — no prior zone.

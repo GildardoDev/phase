@@ -82,6 +82,7 @@ pub mod manifest_dread;
 pub mod mill;
 pub mod monstrosity;
 pub mod overload;
+pub mod pair_with;
 pub mod paradigm;
 pub mod pay;
 pub mod phase_out;
@@ -589,6 +590,7 @@ pub fn resolve_effect(
         Effect::DealDamage { .. } => deal_damage::resolve(state, ability, events),
         Effect::Draw { .. } => draw::resolve(state, ability, events),
         Effect::Pump { .. } => pump::resolve(state, ability, events),
+        Effect::PairWith { .. } => pair_with::resolve(state, ability, events),
         Effect::Destroy { .. } => destroy::resolve(state, ability, events),
         Effect::Regenerate { .. } => regenerate::resolve(state, ability, events),
         Effect::Counter { .. } => counter::resolve(state, ability, events),
@@ -1209,6 +1211,27 @@ fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> Playe
     ability.controller
 }
 
+fn ability_with_event_context_targets(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> ResolvedAbility {
+    let mut pending = ability.clone();
+    if pending.targets.is_empty() {
+        if let Some(filter) = pending.effect.target_filter() {
+            if filter.is_context_ref() {
+                if let Some(target) = crate::game::targeting::resolve_event_context_target(
+                    state,
+                    filter,
+                    pending.source_id,
+                ) {
+                    pending.targets.push(target);
+                }
+            }
+        }
+    }
+    pending
+}
+
 /// CR 603.7c: Extract an event-context target filter from an effect, if present.
 /// Returns the filter only for event-context variants (TriggeringSpellController, etc.)
 /// that auto-resolve from `state.current_trigger_event` at resolution time.
@@ -1216,6 +1239,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
     let filter = match effect {
         Effect::DealDamage { target, .. }
         | Effect::Pump { target, .. }
+        | Effect::PairWith { target }
         | Effect::Destroy { target, .. }
         | Effect::Regenerate { target, .. }
         | Effect::Tap { target, .. }
@@ -1599,7 +1623,8 @@ pub fn resolve_ability_chain(
             .collect();
         if let Some(first) = opponent_order.first().copied() {
             let remaining = opponent_order.split_off(1);
-            state.pending_optional_effect = Some(Box::new(ability.clone()));
+            state.pending_optional_effect =
+                Some(Box::new(ability_with_event_context_targets(state, ability)));
             state.waiting_for = WaitingFor::OpponentMayChoice {
                 player: first,
                 source_id: ability.source_id,
@@ -1636,7 +1661,8 @@ pub fn resolve_ability_chain(
                 return Ok(());
             }
         }
-        state.pending_optional_effect = Some(Box::new(ability.clone()));
+        state.pending_optional_effect =
+            Some(Box::new(ability_with_event_context_targets(state, ability)));
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: prompt_player,
             source_id: ability.source_id,

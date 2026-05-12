@@ -345,6 +345,19 @@ pub fn resolved_targets(
     if matches!(target_filter, TargetFilter::SelfRef) {
         return vec![TargetRef::Object(ability.source_id)];
     }
+    if matches!(target_filter, TargetFilter::SourceOrPaired) {
+        return state
+            .objects
+            .get(&ability.source_id)
+            .and_then(|source| source.paired_with)
+            .map(|partner| {
+                vec![
+                    TargetRef::Object(ability.source_id),
+                    TargetRef::Object(partner),
+                ]
+            })
+            .unwrap_or_default();
+    }
     let use_self = matches!(
         target_filter,
         TargetFilter::None | TargetFilter::ParentTarget

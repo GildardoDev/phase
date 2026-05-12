@@ -1536,6 +1536,8 @@ pub enum FilterProp {
     },
     /// Matches any object that is NOT the trigger source (for "another creature" triggers).
     Another,
+    /// CR 702.95b: Matches objects that are not paired with another creature.
+    Unpaired,
     /// CR 603.4 + CR 109.3: Matches any object that is NOT the object that caused
     /// the currently-evaluating trigger to fire (the "triggering object"). Distinct
     /// from `Another`, which excludes the *ability source*. Used for intervening-if
@@ -1926,6 +1928,9 @@ pub enum TargetFilter {
     Player,
     Controller,
     SelfRef,
+    /// CR 702.95b: Resolves to the source object and the creature it is paired
+    /// with. If the source is not paired, this matches no objects.
+    SourceOrPaired,
     Typed(TypedFilter),
     Not {
         filter: Box<TargetFilter>,
@@ -3140,6 +3145,8 @@ pub enum StaticCondition {
     SourceMatchesFilter {
         filter: TargetFilter,
     },
+    /// CR 702.95b: True while the source object is paired with another creature.
+    SourceIsPaired,
     /// CR 113.6b: True when the source card is in the specified zone.
     /// Used for "as long as ~ is in your graveyard" / "this card is in your graveyard" conditions.
     SourceInZone {
@@ -4012,6 +4019,12 @@ pub enum Effect {
         #[serde(default = "default_pt_value_zero")]
         toughness: PtValue,
         #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
+    /// CR 702.95c-d: Pair the source creature with a targeted unpaired
+    /// creature controlled by the same player. Resolution validates both
+    /// permanents are still legal soulbond partners.
+    PairWith {
         target: TargetFilter,
     },
     Destroy {
@@ -5730,6 +5743,7 @@ impl TargetFilter {
             self,
             TargetFilter::None
                 | TargetFilter::SelfRef
+                | TargetFilter::SourceOrPaired
                 | TargetFilter::Controller
                 | TargetFilter::OriginalController
                 | TargetFilter::ScopedPlayer
@@ -5849,6 +5863,7 @@ impl Effect {
             | Effect::Scry { target, .. }
             | Effect::Surveil { target, .. }
             | Effect::Pump { target, .. }
+            | Effect::PairWith { target }
             | Effect::Destroy { target, .. }
             | Effect::Regenerate { target, .. }
             | Effect::Counter { target, .. }
@@ -6036,6 +6051,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::DealDamage { .. } => "DealDamage",
         Effect::Draw { .. } => "Draw",
         Effect::Pump { .. } => "Pump",
+        Effect::PairWith { .. } => "PairWith",
         Effect::Destroy { .. } => "Destroy",
         Effect::Regenerate { .. } => "Regenerate",
         Effect::Counter { .. } => "Counter",
@@ -6202,6 +6218,7 @@ pub enum EffectKind {
     DealDamage,
     Draw,
     Pump,
+    PairWith,
     Destroy,
     Counter,
     CounterAll,
@@ -6370,6 +6387,7 @@ impl From<&Effect> for EffectKind {
             Effect::DealDamage { .. } => EffectKind::DealDamage,
             Effect::Draw { .. } => EffectKind::Draw,
             Effect::Pump { .. } => EffectKind::Pump,
+            Effect::PairWith { .. } => EffectKind::PairWith,
             Effect::Destroy { .. } => EffectKind::Destroy,
             Effect::Regenerate { .. } => EffectKind::Regenerate,
             Effect::Counter { .. } => EffectKind::Counter,
