@@ -1,4 +1,5 @@
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
+use crate::game::targeting;
 use crate::game::zones;
 use crate::types::ability::{
     Duration, Effect, EffectError, EffectKind, ResolvedAbility, StaticDefinition, TargetFilter,
@@ -36,15 +37,31 @@ pub fn resolve(
         _ => None,
     };
 
-    for target in &ability.targets {
+    let targets = match &ability.effect {
+        Effect::Counter { target, .. } if matches!(target, TargetFilter::ParentTarget) => {
+            let event_target = targeting::resolve_event_context_target(
+                state,
+                &TargetFilter::TriggeringSource,
+                ability.source_id,
+            );
+            match event_target {
+                Some(target) => vec![target],
+                None => targeting::resolved_targets(ability, target, state),
+            }
+        }
+        Effect::Counter { target, .. } => targeting::resolved_targets(ability, target, state),
+        _ => ability.targets.clone(),
+    };
+
+    for target in targets {
         if let TargetRef::Object(obj_id) = target {
             // CR 101.2: Check if the target can't be countered.
             // Two paths: (1) battlefield permanents granting uncounterability
             // (e.g. "Spells you control can't be countered"), and (2) the
             // spell's own intrinsic static definition (e.g. Carnage Tyrant).
             let ctx = StaticCheckContext {
-                source_id: Some(*obj_id),
-                target_id: Some(*obj_id),
+                source_id: Some(obj_id),
+                target_id: Some(obj_id),
                 ..Default::default()
             };
             if check_static_ability(state, StaticMode::CantBeCountered, &ctx) {
@@ -60,7 +77,7 @@ pub fn resolve(
             // behavior change.
             let has_cant_be_countered = state
                 .objects
-                .get(obj_id)
+                .get(&obj_id)
                 .map(|obj| {
                     super::super::functioning_abilities::active_static_definitions(state, obj)
                         .any(|sd| sd.mode == StaticMode::CantBeCountered)
@@ -75,7 +92,7 @@ pub fn resolve(
             let stack_idx = state
                 .stack
                 .iter()
-                .rposition(|e| e.id == *obj_id || e.source_id == *obj_id);
+                .rposition(|e| e.id == obj_id || e.source_id == obj_id);
             if let Some(idx) = stack_idx {
                 let is_spell = matches!(state.stack[idx].kind, StackEntryKind::Spell { .. });
                 // CR 702.34a / CR 702.127a / CR 702.180a: Flashback,
@@ -99,7 +116,7 @@ pub fn resolve(
                     } else {
                         Zone::Graveyard
                     };
-                    zones::move_to_zone(state, *obj_id, dest, events);
+                    zones::move_to_zone(state, obj_id, dest, events);
                 } else {
                     // Ability was countered — apply source_static if present
                     apply_source_static(
@@ -111,7 +128,7 @@ pub fn resolve(
                 }
 
                 events.push(GameEvent::SpellCountered {
-                    object_id: *obj_id,
+                    object_id: obj_id,
                     countered_by: ability.source_id,
                 });
             }

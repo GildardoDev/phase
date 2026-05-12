@@ -4759,14 +4759,15 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, GainLifePlayer,
-        ManaContribution, ManaProduction, QuantityExpr, ResolvedAbility, TargetFilter,
-        TriggerDefinition, TypeFilter, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ControllerRef, Effect,
+        GainLifePlayer, ManaContribution, ManaProduction, ManaSpendRestriction, QuantityExpr,
+        ResolvedAbility, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CardType;
     use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
     use crate::types::identifiers::{CardId, ObjectId};
-    use crate::types::mana::ManaCost;
+    use crate::types::mana::{ManaCost, ManaCostShard};
     use crate::types::TriggerMode;
 
     /// Create a simple test ability definition.
@@ -4816,6 +4817,38 @@ mod tests {
         Arc::make_mut(&mut obj.base_abilities).extend(parsed.abilities);
     }
 
+    fn apply_oracle_to_object(
+        state: &mut GameState,
+        object_id: ObjectId,
+        name: &str,
+        oracle_text: &str,
+    ) {
+        let obj = state.objects.get(&object_id).unwrap();
+        let types = obj
+            .card_types
+            .core_types
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let subtypes = obj.card_types.subtypes.clone();
+        let parsed = parse_oracle_text(oracle_text, name, &[], &types, &subtypes);
+        let obj = state.objects.get_mut(&object_id).unwrap();
+        Arc::make_mut(&mut obj.abilities).extend(parsed.abilities.clone());
+        Arc::make_mut(&mut obj.base_abilities).extend(parsed.abilities);
+        for trigger in parsed.triggers.clone() {
+            obj.trigger_definitions.push(trigger);
+        }
+        Arc::make_mut(&mut obj.base_trigger_definitions).extend(parsed.triggers);
+        for replacement in parsed.replacements.clone() {
+            obj.replacement_definitions.push(replacement);
+        }
+        Arc::make_mut(&mut obj.base_replacement_definitions).extend(parsed.replacements);
+        for static_def in parsed.statics.clone() {
+            obj.static_definitions.push(static_def);
+        }
+        Arc::make_mut(&mut obj.base_static_definitions).extend(parsed.statics);
+    }
+
     use crate::game::test_fixtures::brushland_colored_ability;
 
     fn setup_game_at_main_phase() -> GameState {
@@ -4828,6 +4861,373 @@ mod tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    #[test]
+    fn eldrazi_temple_restricted_mana_casts_kindred_eldrazi_spell_only() {
+        let mut state = setup_game_at_main_phase();
+        let temple = create_object(
+            &mut state,
+            CardId(9100),
+            PlayerId(0),
+            "Eldrazi Temple".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&temple).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 2 },
+                        },
+                        restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation(
+                            "Colorless Eldrazi".to_string(),
+                        )],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        let command = create_object(
+            &mut state,
+            CardId(9101),
+            PlayerId(0),
+            "Kozilek's Command".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&command).unwrap();
+            obj.card_types.core_types.push(CoreType::Kindred);
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.card_types.subtypes.push("Eldrazi".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::X,
+                    ManaCostShard::Colorless,
+                    ManaCostShard::Colorless,
+                ],
+                generic: 0,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 0 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: temple,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: command,
+                card_id: CardId(9101),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::ChooseXValue { .. }
+        ));
+        apply_as_current(&mut state, GameAction::ChooseX { value: 0 }).unwrap();
+        assert!(
+            state.stack.iter().any(|entry| entry.source_id == command),
+            "Eldrazi Temple mana should pay for colorless Kindred Eldrazi spells"
+        );
+
+        let mut state = setup_game_at_main_phase();
+        let temple = create_object(
+            &mut state,
+            CardId(9110),
+            PlayerId(0),
+            "Eldrazi Temple".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&temple).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 2 },
+                        },
+                        restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation(
+                            "Colorless Eldrazi".to_string(),
+                        )],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+        let construct = create_object(
+            &mut state,
+            CardId(9111),
+            PlayerId(0),
+            "Colorless Construct".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&construct).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Construct".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Colorless, ManaCostShard::Colorless],
+                generic: 0,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 0 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: temple,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+        assert!(
+            apply_as_current(
+                &mut state,
+                GameAction::CastSpell {
+                    object_id: construct,
+                    card_id: CardId(9111),
+                    targets: vec![],
+                },
+            )
+            .is_err(),
+            "Eldrazi Temple restricted mana must not pay for non-Eldrazi spells"
+        );
+    }
+
+    #[test]
+    fn chalice_of_the_void_enters_with_x_and_counters_matching_spell() {
+        let mut state = setup_game_at_main_phase();
+        let chalice = create_object(
+            &mut state,
+            CardId(9120),
+            PlayerId(0),
+            "Chalice of the Void".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&chalice).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::X],
+                generic: 0,
+            };
+        }
+        apply_oracle_to_object(
+            &mut state,
+            chalice,
+            "Chalice of the Void",
+            "This artifact enters with X charge counters on it.\nWhenever a player casts a spell with mana value equal to the number of charge counters on this artifact, counter that spell.",
+        );
+        let player = state
+            .players
+            .iter_mut()
+            .find(|player| player.id == PlayerId(0))
+            .unwrap();
+        for _ in 0..3 {
+            player.mana_pool.add(crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: chalice,
+                card_id: CardId(9120),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        apply_as_current(&mut state, GameAction::ChooseX { value: 1 }).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        assert_eq!(state.objects[&chalice].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&chalice]
+                .counters
+                .get(&CounterType::Generic("charge".to_string()))
+                .copied()
+                .unwrap_or_default(),
+            1
+        );
+
+        let spell = create_object(
+            &mut state,
+            CardId(9121),
+            PlayerId(0),
+            "One Mana Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 0 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+        state
+            .players
+            .iter_mut()
+            .find(|player| player.id == PlayerId(0))
+            .unwrap()
+            .mana_pool
+            .add(crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(9121),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert!(
+            state.stack.iter().any(|entry| entry.source_id == chalice),
+            "Chalice should trigger for a spell with matching mana value"
+        );
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert_eq!(
+            state.objects[&spell].zone,
+            Zone::Graveyard,
+            "Chalice trigger should counter the matching spell"
+        );
+    }
+
+    #[test]
+    fn broadside_bombardiers_boast_activates_after_attacking_and_requires_sacrifice() {
+        use crate::game::combat::AttackTarget;
+
+        let mut state = setup_game_at_main_phase();
+        state.phase = Phase::DeclareAttackers;
+        let bombardiers = create_object(
+            &mut state,
+            CardId(9140),
+            PlayerId(0),
+            "Broadside Bombardiers".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bombardiers).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Goblin".to_string());
+            obj.card_types.subtypes.push("Pirate".to_string());
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.summoning_sick = false;
+        }
+        apply_oracle_to_object(
+            &mut state,
+            bombardiers,
+            "Broadside Bombardiers",
+            "Menace\nHaste\nBoast — Sacrifice another creature or artifact: This creature deals damage equal to 2 plus the sacrificed permanent's mana value to any target. (Activate only if this creature attacked this turn and only once each turn.)",
+        );
+        let sacrifice = create_object(
+            &mut state,
+            CardId(9141),
+            PlayerId(0),
+            "Sacrifice Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&sacrifice).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+        }
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![bombardiers],
+            valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        };
+        apply_as_current(
+            &mut state,
+            GameAction::DeclareAttackers {
+                attacks: vec![(bombardiers, AttackTarget::Player(PlayerId(1)))],
+            },
+        )
+        .unwrap();
+        let ability_index = state.objects[&bombardiers]
+            .abilities
+            .iter()
+            .position(|ability| ability.ability_tag == Some(AbilityTag::Boast))
+            .expect("Broadside Bombardiers should have a Boast ability");
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: bombardiers,
+                ability_index,
+            },
+        )
+        .unwrap();
+        if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {
+            apply_as_current(
+                &mut state,
+                GameAction::SelectTargets {
+                    targets: vec![TargetRef::Player(PlayerId(1))],
+                },
+            )
+            .unwrap();
+        }
+        let WaitingFor::SacrificeForCost {
+            count, permanents, ..
+        } = &state.waiting_for
+        else {
+            panic!("Broadside Bombardiers boast should require a sacrifice cost");
+        };
+        assert_eq!(*count, 1);
+        assert!(permanents.contains(&sacrifice));
+        assert!(!permanents.contains(&bombardiers));
     }
 
     fn room_back_face(name: &str) -> BackFaceData {
@@ -7044,7 +7444,7 @@ mod tests {
     // === Phase 04 Plan 03 Integration Tests ===
 
     use crate::types::ability::TargetRef;
-    use crate::types::mana::{ManaCostShard, ManaType, ManaUnit};
+    use crate::types::mana::{ManaType, ManaUnit};
 
     fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usize) {
         let player_data = state.players.iter_mut().find(|p| p.id == player).unwrap();
