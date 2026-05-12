@@ -674,7 +674,7 @@ fn has_exile_cast_permission(
         })
 }
 
-fn source_has_linked_collection_counter_play_permission(
+fn source_has_collection_counter_play_permission(
     state: &GameState,
     source: ObjectId,
     player: PlayerId,
@@ -691,6 +691,26 @@ fn source_has_linked_collection_counter_play_permission(
     })
 }
 
+fn live_collection_counter_play_permission_source(
+    state: &GameState,
+    player: PlayerId,
+) -> Option<ObjectId> {
+    state.battlefield.iter().copied().find(|source| {
+        !state.exile_play_permissions_used.contains(source)
+            && source_has_collection_counter_play_permission(state, *source, player)
+    })
+}
+
+fn has_collection_counter(obj: &crate::game::game_object::GameObject) -> bool {
+    obj.counters
+        .get(&crate::types::counter::CounterType::Generic(
+            "collection".to_string(),
+        ))
+        .copied()
+        .unwrap_or(0)
+        > 0
+}
+
 pub(crate) fn play_from_exile_permission_source(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
@@ -702,16 +722,18 @@ pub(crate) fn play_from_exile_permission_source(
             granted_to,
             frequency,
             source_id,
+            exiled_by_ability_controller,
             ..
         } if *granted_to == player => {
             let source = source_id.unwrap_or(obj.id);
             if *frequency == CastFrequency::OncePerTurn {
-                if state.exile_play_permissions_used.contains(&source) {
-                    return None;
+                if *exiled_by_ability_controller == Some(player) {
+                    return has_collection_counter(obj)
+                        .then(|| live_collection_counter_play_permission_source(state, player))
+                        .flatten()
+                        .map(|live_source| (live_source, *frequency));
                 }
-                if source_id.is_some()
-                    && !source_has_linked_collection_counter_play_permission(state, source, player)
-                {
+                if state.exile_play_permissions_used.contains(&source) {
                     return None;
                 }
             }
@@ -6991,6 +7013,10 @@ mod tests {
         {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.counters.insert(
+                crate::types::counter::CounterType::Generic("collection".to_string()),
+                1,
+            );
             Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Draw {
@@ -8904,6 +8930,7 @@ mod tests {
                     granted_to: PlayerId(0),
                     frequency: CastFrequency::Unlimited,
                     source_id: None,
+                    exiled_by_ability_controller: None,
                     mana_spend_permission: None,
                 });
         }
@@ -8951,6 +8978,7 @@ mod tests {
                     granted_to: PlayerId(0),
                     frequency: CastFrequency::Unlimited,
                     source_id: None,
+                    exiled_by_ability_controller: None,
                     mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
                 });
         }
@@ -8995,6 +9023,10 @@ mod tests {
         {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.counters.insert(
+                crate::types::counter::CounterType::Generic("collection".to_string()),
+                1,
+            );
             Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Draw {
@@ -9008,6 +9040,7 @@ mod tests {
                     granted_to: PlayerId(0),
                     frequency: CastFrequency::OncePerTurn,
                     source_id: Some(source),
+                    exiled_by_ability_controller: Some(PlayerId(0)),
                     mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
                 });
         }
