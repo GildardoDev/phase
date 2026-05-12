@@ -11,8 +11,11 @@ use rand::Rng;
 /// Strategy scales with difficulty per D-02:
 /// - VeryEasy: pure random
 /// - Easy: rarity-weighted
-/// - Medium: color preference + rarity + curve awareness (from enriched DraftCardInstance)
-/// - Hard/VeryHard: `phase_ai::draft_eval` card quality + color discipline + curve
+/// - Medium / Hard: `phase_ai::draft_eval` card quality + rarity + color discipline + curve
+/// - VeryHard: same, with stricter color discipline (an off-color penalty)
+///
+/// (Medium falls back to the lighter color + rarity + curve heuristic when no
+/// CardDatabase is loaded, via [`pick_by_evaluation`].)
 ///
 /// Returns the index into the `pack` slice.
 pub fn bot_pick(
@@ -29,8 +32,9 @@ pub fn bot_pick(
     match difficulty {
         AiDifficulty::VeryEasy => rng.random_range(0..pack.len()),
         AiDifficulty::Easy => pick_by_rarity(pack),
-        AiDifficulty::Medium => pick_by_color_and_rarity(pack, prior_picks),
-        AiDifficulty::Hard => pick_by_evaluation(pack, prior_picks, card_db, false),
+        AiDifficulty::Medium | AiDifficulty::Hard => {
+            pick_by_evaluation(pack, prior_picks, card_db, false)
+        }
         AiDifficulty::VeryHard => pick_by_evaluation(pack, prior_picks, card_db, true),
     }
 }
@@ -44,8 +48,9 @@ fn pick_by_rarity(pack: &[DraftCardInstance]) -> usize {
         .unwrap_or(0)
 }
 
-/// Medium strategy: score = rarity * 2 + color_bonus + curve_bonus.
-/// Uses enriched DraftCardInstance fields (colors, cmc) directly.
+/// Lighter heuristic: score = rarity * 2 + color_bonus + curve_bonus, using the
+/// enriched DraftCardInstance fields (colors, cmc) directly. Used as the no-DB
+/// fallback inside [`pick_by_evaluation`].
 fn pick_by_color_and_rarity(
     pack: &[DraftCardInstance],
     prior_picks: &[DraftCardInstance],
@@ -74,8 +79,10 @@ fn pick_by_color_and_rarity(
         .unwrap_or(0)
 }
 
-/// Hard/VeryHard strategy: `phase_ai::draft_eval` card quality + color discipline + curve.
-/// Falls back to Medium strategy if CardDatabase is not loaded.
+/// Medium/Hard/VeryHard strategy: `phase_ai::draft_eval` card quality plus a rarity
+/// prior, color discipline, and a curve bonus. `strict` (VeryHard) raises the
+/// on-color bonus and adds an off-color penalty. Falls back to
+/// [`pick_by_color_and_rarity`] if no CardDatabase is loaded.
 fn pick_by_evaluation(
     pack: &[DraftCardInstance],
     prior_picks: &[DraftCardInstance],
