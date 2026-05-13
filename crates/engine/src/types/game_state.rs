@@ -2629,11 +2629,15 @@ pub enum CastingVariant {
 }
 
 impl CastingVariant {
-    pub fn stack_to_graveyard_replacement(self) -> Option<Zone> {
-        if matches!(
+    pub fn exiles_when_leaving_stack_for_any_reason(self) -> bool {
+        matches!(
             self,
             CastingVariant::Flashback | CastingVariant::Aftermath | CastingVariant::Harmonize
-        ) {
+        )
+    }
+
+    pub fn stack_to_graveyard_replacement(self) -> Option<Zone> {
+        if self.exiles_when_leaving_stack_for_any_reason() {
             return Some(Zone::Exile);
         }
         if let CastingVariant::GraveyardPermission {

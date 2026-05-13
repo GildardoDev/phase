@@ -5831,6 +5831,30 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 mod tests {
     use super::*;
 
+    fn typed_leg(filter: &TargetFilter) -> Option<&TypedFilter> {
+        match filter {
+            TargetFilter::Typed(tf) => Some(tf),
+            TargetFilter::And { filters } => filters.iter().find_map(typed_leg),
+            _ => None,
+        }
+    }
+
+    fn is_stack_spell_leg(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::StackSpell => true,
+            TargetFilter::And { filters } => filters.iter().any(is_stack_spell_leg),
+            _ => false,
+        }
+    }
+
+    fn has_type(tf: &TypedFilter, ty: TypeFilter) -> bool {
+        tf.type_filters.iter().any(|candidate| candidate == &ty)
+    }
+
+    fn has_prop(tf: &TypedFilter, prop: FilterProp) -> bool {
+        tf.properties.iter().any(|candidate| candidate == &prop)
+    }
+
     #[test]
     fn parse_outside_game_wish_reveal_to_hand() {
         let ability = super::super::parse_effect_chain(
@@ -6453,18 +6477,18 @@ mod tests {
                     filters.iter().any(|filter| matches!(
                         filter,
                         crate::types::ability::TargetFilter::Typed(tf)
-                            if tf.type_filters.contains(&crate::types::ability::TypeFilter::Creature)
-                                && tf.properties.contains(&crate::types::ability::FilterProp::Another)
+                            if has_type(tf, crate::types::ability::TypeFilter::Creature)
+                                && has_prop(tf, crate::types::ability::FilterProp::Another)
                     )),
                     "expected creature branch with Another, got {filters:?}"
                 );
                 assert!(
-                    filters.iter().any(|filter| matches!(
-                        filter,
-                        crate::types::ability::TargetFilter::Typed(tf)
-                            if tf.type_filters.contains(&crate::types::ability::TypeFilter::Card)
-                                && tf.properties.contains(&crate::types::ability::FilterProp::Another)
-                    )),
+                    filters.iter().any(|filter| {
+                        is_stack_spell_leg(filter)
+                            && typed_leg(filter).is_some_and(|tf| {
+                                has_prop(tf, crate::types::ability::FilterProp::Another)
+                            })
+                    }),
                     "expected spell branch with Another, got {filters:?}"
                 );
             }

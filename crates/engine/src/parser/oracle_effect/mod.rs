@@ -14111,6 +14111,30 @@ mod tests {
     use crate::types::player::PlayerCounterKind;
     use crate::types::zones::Zone;
 
+    fn typed_leg(filter: &TargetFilter) -> Option<&TypedFilter> {
+        match filter {
+            TargetFilter::Typed(tf) => Some(tf),
+            TargetFilter::And { filters } => filters.iter().find_map(typed_leg),
+            _ => None,
+        }
+    }
+
+    fn is_stack_spell_leg(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::StackSpell => true,
+            TargetFilter::And { filters } => filters.iter().any(is_stack_spell_leg),
+            _ => false,
+        }
+    }
+
+    fn has_type(tf: &TypedFilter, ty: TypeFilter) -> bool {
+        tf.type_filters.iter().any(|candidate| candidate == &ty)
+    }
+
+    fn has_prop(tf: &TypedFilter, prop: FilterProp) -> bool {
+        tf.properties.iter().any(|candidate| candidate == &prop)
+    }
+
     /// Parser must not invent verb stems for unknown words. The "-es" stripping
     /// rule in `normalize_verb_token` was previously triggered purely by
     /// orthographic suffix (stem ends in `ch`/`sh`/`ss`/`x`/`z`), which
@@ -15419,11 +15443,9 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Counter {
-                target: TargetFilter::Typed(TypedFilter { properties, .. }),
+                target: TargetFilter::StackSpell,
                 ..
-            } if properties
-                .iter()
-                .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))
+            }
         ));
     }
 
@@ -15440,11 +15462,9 @@ mod tests {
                 target: TargetFilter::Or { filters },
                 ..
             } if filters.iter().all(|f| {
-                matches!(
-                    f,
-                    TargetFilter::Typed(TypedFilter { properties, .. })
-                        if properties.iter().any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))
-                )
+                is_stack_spell_leg(f) && typed_leg(f).is_some_and(|tf| {
+                    has_type(tf, TypeFilter::Artifact) || has_type(tf, TypeFilter::Enchantment)
+                })
             })
         ));
     }
@@ -15455,11 +15475,31 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Counter {
-                target: TargetFilter::Typed(TypedFilter { properties, .. }),
+                target,
                 ..
-            } if properties.iter().any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))
-                && properties.iter().any(|p| matches!(p, FilterProp::Cmc { comparator: Comparator::GE, value: QuantityExpr::Fixed { value: 4 } }))
+            } if is_stack_spell_leg(&target)
+                && typed_leg(&target).is_some_and(|tf| {
+                    tf.properties.iter().any(|p| matches!(p, FilterProp::Cmc { comparator: Comparator::GE, value: QuantityExpr::Fixed { value: 4 } }))
+                })
         ));
+    }
+
+    #[test]
+    fn effect_unsubstantiate_uses_stack_spell_for_spell_leg() {
+        let e = parse_effect("Return target spell or creature to its owner's hand");
+        let Effect::Bounce { target, .. } = e else {
+            panic!("expected Bounce to hand, got {e:?}");
+        };
+        let TargetFilter::Or { filters } = target else {
+            panic!("expected Or target filter, got {target:?}");
+        };
+        assert!(filters
+            .iter()
+            .any(|filter| matches!(filter, TargetFilter::StackSpell)));
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(tf) if has_type(tf, TypeFilter::Creature)
+        )));
     }
 
     #[test]
@@ -15497,11 +15537,7 @@ mod tests {
             AbilityKind::Spell,
         );
         if let Effect::Counter { target, .. } = def.effect.as_ref() {
-            assert!(
-                matches!(target, TargetFilter::Typed(TypedFilter { properties, .. })
-                    if properties.iter().any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))),
-                "target should be on stack"
-            );
+            assert!(is_stack_spell_leg(target), "target should be on stack");
         } else {
             panic!("expected Counter effect, got {:?}", def.effect);
         }
@@ -16561,63 +16597,50 @@ mod tests {
 
     /// CR 701.6 + CR 405.1: "Counter all spells your opponents control"
     /// (Glen Elendra's Answer) must lower to `Effect::CounterAll` with the
-    /// class filter preserving `controller: Opponent`, `InZone Stack`, and
-    /// the spell-card type — so the runtime resolver iterates the stack and
-    /// counters every matching opponent spell instead of prompting for one.
+    /// first-class spell-on-stack filter plus opponent controller scoping, so
+    /// the runtime resolver iterates the stack and counters every matching
+    /// opponent spell instead of prompting for one.
     #[test]
     fn effect_counter_all_opponent_spells_glen_elendra() {
         let e = parse_effect("Counter all spells your opponents control");
         match e {
-            Effect::CounterAll {
-                target: TargetFilter::Typed(filter),
-            } => {
+            Effect::CounterAll { target } => {
                 assert!(
-                    matches!(
-                        filter.controller,
-                        Some(crate::types::ability::ControllerRef::Opponent)
-                    ),
-                    "controller scoping preserved, got {:?}",
-                    filter.controller
+                    is_stack_spell_leg(&target),
+                    "StackSpell missing: {target:?}"
                 );
-                assert!(
-                    filter
-                        .properties
-                        .iter()
-                        .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack })),
-                    "InZone Stack preserved, got {:?}",
-                    filter.properties
+                let filter =
+                    typed_leg(&target).unwrap_or_else(|| panic!("missing typed leg: {target:?}"));
+                assert_eq!(
+                    filter.controller,
+                    Some(crate::types::ability::ControllerRef::Opponent),
+                    "controller scoping preserved"
                 );
             }
-            other => panic!("expected CounterAll {{ Typed }}, got {other:?}"),
+            other => panic!("expected CounterAll, got {other:?}"),
         }
     }
 
     /// "Counter all other spells" (Swift Silence) — `other` lowers to a
-    /// `FilterProp::Another` constraint plus the stack-zone pin.
+    /// `FilterProp::Another` constraint plus the first-class stack-spell pin.
     #[test]
     fn effect_counter_all_other_spells_swift_silence() {
         let e = parse_effect("Counter all other spells");
         match e {
-            Effect::CounterAll {
-                target: TargetFilter::Typed(filter),
-            } => {
+            Effect::CounterAll { target } => {
                 assert!(
-                    filter
-                        .properties
-                        .iter()
-                        .any(|p| matches!(p, FilterProp::Another)),
+                    is_stack_spell_leg(&target),
+                    "StackSpell missing: {target:?}"
+                );
+                let filter =
+                    typed_leg(&target).unwrap_or_else(|| panic!("missing typed leg: {target:?}"));
+                assert!(
+                    has_prop(filter, FilterProp::Another),
                     "Another constraint preserved, got {:?}",
                     filter.properties
                 );
-                assert!(
-                    filter
-                        .properties
-                        .iter()
-                        .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack })),
-                    "InZone Stack preserved"
-                );
             }
-            other => panic!("expected CounterAll {{ Typed, Another }}, got {other:?}"),
+            other => panic!("expected CounterAll with Another, got {other:?}"),
         }
     }
 
@@ -21691,24 +21714,12 @@ mod tests {
         assert_eq!(filters.len(), 2);
         let types: Vec<_> = filters
             .iter()
-            .filter_map(|f| {
-                if let TargetFilter::Typed(tf) = f {
-                    tf.get_primary_type().cloned()
-                } else {
-                    None
-                }
-            })
+            .filter_map(|f| typed_leg(f).and_then(|tf| tf.get_primary_type().cloned()))
             .collect();
         assert!(types.contains(&TypeFilter::Instant));
         assert!(types.contains(&TypeFilter::Sorcery));
-        // Both should have InZone(Stack)
         for f in filters {
-            if let TargetFilter::Typed(tf) = f {
-                assert!(tf
-                    .properties
-                    .iter()
-                    .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack })));
-            }
+            assert!(is_stack_spell_leg(f), "StackSpell missing from {f:?}");
         }
     }
 
@@ -23964,12 +23975,10 @@ mod tests {
 
         match &*def.effect {
             Effect::Counter { target, .. } => {
-                assert!(matches!(
-                    target,
-                    TargetFilter::Typed(tf)
-                        if tf.type_filters.contains(&TypeFilter::Card)
-                            && tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
-                ));
+                assert!(
+                    is_stack_spell_leg(target),
+                    "expected StackSpell, got {target:?}"
+                );
             }
             other => panic!("expected Counter effect, got {other:?}"),
         }
@@ -24128,19 +24137,16 @@ mod tests {
                     filters.iter().any(|filter| matches!(
                         filter,
                         TargetFilter::Typed(tf)
-                            if tf.type_filters.contains(&TypeFilter::Creature)
-                                && tf.properties.contains(&FilterProp::Another)
+                            if has_type(tf, TypeFilter::Creature)
+                                && has_prop(tf, FilterProp::Another)
                     )),
                     "expected creature branch with Another, got {filters:?}"
                 );
                 assert!(
-                    filters.iter().any(|filter| matches!(
-                        filter,
-                        TargetFilter::Typed(tf)
-                            if tf.type_filters.contains(&TypeFilter::Card)
-                                && tf.properties.contains(&FilterProp::Another)
-                                && tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
-                    )),
+                    filters.iter().any(|filter| {
+                        is_stack_spell_leg(filter)
+                            && typed_leg(filter).is_some_and(|tf| has_prop(tf, FilterProp::Another))
+                    }),
                     "expected spell branch with Another, got {filters:?}"
                 );
             }

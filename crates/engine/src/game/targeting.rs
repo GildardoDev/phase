@@ -176,8 +176,13 @@ pub fn find_legal_targets(
                 Zone::Stack => {
                     for entry in &state.stack {
                         let obj_id = entry.id;
-                        if super::filter::matches_target_filter(state, obj_id, filter, &target_ctx)
-                        {
+                        if stack_entry_matches_filter(
+                            state,
+                            entry,
+                            filter,
+                            source_controller,
+                            source_id,
+                        ) {
                             let obj = match state.objects.get(&obj_id) {
                                 Some(o) => o,
                                 None => continue,
@@ -659,6 +664,26 @@ fn add_stack_abilities(
     }
 }
 
+pub(crate) fn stack_entry_matches_filter(
+    state: &GameState,
+    entry: &StackEntry,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    match &entry.kind {
+        StackEntryKind::Spell { .. } => {
+            stack_spell_entry_matches_filter(state, entry, filter, source_controller, source_id)
+        }
+        StackEntryKind::ActivatedAbility { .. }
+        | StackEntryKind::TriggeredAbility { .. }
+        | StackEntryKind::KeywordAction { .. } => {
+            filter_targets_stack_abilities(filter)
+                && stack_ability_matches_filter(entry, filter, source_controller)
+        }
+    }
+}
+
 fn stack_ability_matches_filter(
     entry: &StackEntry,
     filter: &TargetFilter,
@@ -766,73 +791,108 @@ fn add_stack_spells(
     source_id: ObjectId,
     targets: &mut Vec<TargetRef>,
 ) {
+    for entry in &state.stack {
+        if !stack_spell_entry_matches_filter(state, entry, filter, source_controller, source_id) {
+            continue;
+        }
+
+        let obj = match state.objects.get(&entry.id) {
+            Some(o) => o,
+            None => continue,
+        };
+        if can_target(obj, source_controller, source_id, state) {
+            targets.push(TargetRef::Object(entry.id));
+        }
+    }
+}
+
+fn stack_spell_entry_matches_filter(
+    state: &GameState,
+    entry: &StackEntry,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    if !matches!(entry.kind, StackEntryKind::Spell { .. }) {
+        return false;
+    }
+
     let requires_single_target = filter_requires_single_target(filter);
     let targets_only_constraint = super::filter::extract_targets_only(filter);
     let targets_constraint = super::filter::extract_targets(filter);
     let source_controller_opt = state.objects.get(&source_id).map(|o| o.controller);
 
-    for entry in &state.stack {
-        if !matches!(
-            entry.kind,
-            crate::types::game_state::StackEntryKind::Spell { .. }
-        ) {
-            continue;
+    // CR 115.9a: "with a single target" counts the spell's chosen target instances.
+    if requires_single_target {
+        let targets = entry.ability().map(|a| &a.targets[..]).unwrap_or(&[]);
+        if targets.len() != 1 {
+            return false;
         }
-        // CR 115.7: "with a single target" — only match stack entries with exactly one target.
-        if requires_single_target {
-            let targets = entry.ability().map(|a| &a.targets[..]).unwrap_or(&[]);
-            if targets.len() != 1 {
-                continue;
-            }
+    }
+
+    let bare_ctx = super::filter::FilterContext::from_source(state, source_id);
+    // CR 115.9c: "that targets only [X]" — all targets must match the constraint filter.
+    if let Some(ref constraint) = targets_only_constraint {
+        let targets = entry.ability().map(|a| &a.targets[..]).unwrap_or(&[]);
+        if targets.is_empty()
+            || !targets.iter().all(|t| match t {
+                TargetRef::Object(id) => {
+                    super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
+                }
+                TargetRef::Player(pid) => super::filter::player_matches_target_filter(
+                    constraint,
+                    *pid,
+                    source_controller_opt,
+                ),
+            })
+        {
+            return false;
         }
-        let bare_ctx = super::filter::FilterContext::from_source(state, source_id);
-        // CR 115.9c: "that targets only [X]" — all targets must match the constraint filter.
-        if let Some(ref constraint) = targets_only_constraint {
-            let targets = entry.ability().map(|a| &a.targets[..]).unwrap_or(&[]);
-            if targets.is_empty()
-                || !targets.iter().all(|t| match t {
-                    TargetRef::Object(id) => {
-                        super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
-                    }
-                    TargetRef::Player(pid) => super::filter::player_matches_target_filter(
-                        constraint,
-                        *pid,
-                        source_controller_opt,
-                    ),
-                })
-            {
-                continue;
-            }
+    }
+    // CR 115.9b: "that targets [X]" — at least one target must match (.any() semantics).
+    if let Some(ref constraint) = targets_constraint {
+        let targets = entry.ability().map(|a| &a.targets[..]).unwrap_or(&[]);
+        if targets.is_empty()
+            || !targets.iter().any(|t| match t {
+                TargetRef::Object(id) => {
+                    super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
+                }
+                TargetRef::Player(pid) => super::filter::player_matches_target_filter(
+                    constraint,
+                    *pid,
+                    source_controller_opt,
+                ),
+            })
+        {
+            return false;
         }
-        // CR 115.9b: "that targets [X]" — at least one target must match (.any() semantics).
-        if let Some(ref constraint) = targets_constraint {
-            let targets = entry.ability().map(|a| &a.targets[..]).unwrap_or(&[]);
-            if targets.is_empty()
-                || !targets.iter().any(|t| match t {
-                    TargetRef::Object(id) => {
-                        super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
-                    }
-                    TargetRef::Player(pid) => super::filter::player_matches_target_filter(
-                        constraint,
-                        *pid,
-                        source_controller_opt,
-                    ),
-                })
-            {
-                continue;
-            }
+    }
+
+    let controlled_ctx =
+        super::filter::FilterContext::from_source_with_controller(source_id, source_controller);
+    stack_spell_matches_filter(state, entry.id, filter, &controlled_ctx)
+}
+
+fn stack_spell_matches_filter(
+    state: &GameState,
+    object_id: ObjectId,
+    filter: &TargetFilter,
+    ctx: &super::filter::FilterContext,
+) -> bool {
+    match filter {
+        TargetFilter::StackSpell => true,
+        TargetFilter::StackAbility { .. } => false,
+        TargetFilter::Typed(_) => {
+            super::filter::matches_target_filter(state, object_id, filter, ctx)
         }
-        let controlled_ctx =
-            super::filter::FilterContext::from_source_with_controller(source_id, source_controller);
-        if super::filter::matches_target_filter(state, entry.id, filter, &controlled_ctx) {
-            let obj = match state.objects.get(&entry.id) {
-                Some(o) => o,
-                None => continue,
-            };
-            if can_target(obj, source_controller, source_id, state) {
-                targets.push(TargetRef::Object(entry.id));
-            }
-        }
+        TargetFilter::And { filters } => filters
+            .iter()
+            .all(|filter| stack_spell_matches_filter(state, object_id, filter, ctx)),
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|filter| stack_spell_matches_filter(state, object_id, filter, ctx)),
+        TargetFilter::Not { filter } => !stack_spell_matches_filter(state, object_id, filter, ctx),
+        other => super::filter::matches_target_filter(state, object_id, other, ctx),
     }
 }
 
@@ -852,6 +912,7 @@ fn filter_requires_single_target(filter: &TargetFilter) -> bool {
 
 fn filter_targets_stack_spells(filter: &TargetFilter) -> bool {
     match filter {
+        TargetFilter::StackSpell => true,
         TargetFilter::Typed(TypedFilter {
             type_filters,
             properties,
@@ -1678,6 +1739,151 @@ mod tests {
         assert!(targets.contains(&TargetRef::Object(spell_id)));
         assert!(!targets.contains(&TargetRef::Object(source_id)));
         assert!(!targets.contains(&TargetRef::Object(land)));
+    }
+
+    #[test]
+    fn stack_spell_or_creature_filter_matches_spells_and_creatures_only() {
+        let (mut state, source_id, creature, land) = setup_with_typed_creatures();
+        let spell_id = create_object(
+            &mut state,
+            CardId(301),
+            PlayerId(1),
+            "Stack Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(1),
+            kind: crate::types::game_state::StackEntryKind::Spell {
+                card_id: CardId(301),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let ability_id = create_object(
+            &mut state,
+            CardId(302),
+            PlayerId(1),
+            "Stack Ability".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: ability_id,
+            source_id,
+            controller: PlayerId(1),
+            kind: crate::types::game_state::StackEntryKind::KeywordAction {
+                action: crate::types::ability::KeywordAction::Equip {
+                    equipment_id: source_id,
+                    target_creature_id: creature,
+                },
+            },
+        });
+
+        let filter = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::StackSpell,
+                TargetFilter::Typed(TypedFilter::creature()),
+            ],
+        };
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), source_id);
+
+        assert!(targets.contains(&TargetRef::Object(spell_id)));
+        assert!(targets.contains(&TargetRef::Object(creature)));
+        assert!(!targets.contains(&TargetRef::Object(ability_id)));
+        assert!(!targets.contains(&TargetRef::Object(land)));
+    }
+
+    #[test]
+    fn explicit_stack_zone_composed_stack_spell_filter_matches_instant_spell() {
+        let (mut state, source_id, creature, _land) = setup_with_typed_creatures();
+        let instant_id = create_object(
+            &mut state,
+            CardId(303),
+            PlayerId(1),
+            "Instant Spell".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&instant_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: instant_id,
+            source_id: instant_id,
+            controller: PlayerId(1),
+            kind: crate::types::game_state::StackEntryKind::Spell {
+                card_id: CardId(303),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let sorcery_id = create_object(
+            &mut state,
+            CardId(304),
+            PlayerId(1),
+            "Sorcery Spell".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&sorcery_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Sorcery);
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: sorcery_id,
+            source_id: sorcery_id,
+            controller: PlayerId(1),
+            kind: crate::types::game_state::StackEntryKind::Spell {
+                card_id: CardId(304),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let ability_id = create_object(
+            &mut state,
+            CardId(305),
+            PlayerId(1),
+            "Stack Ability".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: ability_id,
+            source_id,
+            controller: PlayerId(1),
+            kind: crate::types::game_state::StackEntryKind::KeywordAction {
+                action: crate::types::ability::KeywordAction::Equip {
+                    equipment_id: source_id,
+                    target_creature_id: creature,
+                },
+            },
+        });
+
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::StackSpell,
+                TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Instant)
+                        .properties(vec![FilterProp::InZone { zone: Zone::Stack }]),
+                ),
+            ],
+        };
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), source_id);
+
+        assert!(targets.contains(&TargetRef::Object(instant_id)));
+        assert!(!targets.contains(&TargetRef::Object(sorcery_id)));
+        assert!(!targets.contains(&TargetRef::Object(ability_id)));
     }
 
     #[test]

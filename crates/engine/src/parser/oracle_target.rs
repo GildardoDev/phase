@@ -1953,7 +1953,7 @@ fn scope_target_spell_phrase(filter: TargetFilter, phrase: &str) -> TargetFilter
         return filter;
     }
 
-    add_stack_zone_to_spell_targets(filter, target_phrase_uses_spell_suffix(phrase))
+    scope_spell_targets_to_stack(filter, target_phrase_uses_spell_suffix(phrase))
 }
 
 fn target_phrase_mentions_spell_word(phrase: &str) -> bool {
@@ -1976,37 +1976,51 @@ fn target_phrase_uses_spell_suffix(phrase: &str) -> bool {
     false
 }
 
-fn add_stack_zone_to_spell_targets(filter: TargetFilter, scope_all_typed: bool) -> TargetFilter {
+fn scope_spell_targets_to_stack(filter: TargetFilter, scope_all_typed: bool) -> TargetFilter {
     match filter {
-        TargetFilter::Typed(mut typed) => {
-            if (scope_all_typed || typed.type_filters.contains(&TypeFilter::Card))
-                && !typed
-                    .properties
+        TargetFilter::Typed(typed)
+            if scope_all_typed
+                || typed
+                    .type_filters
                     .iter()
-                    .any(|prop| matches!(prop, FilterProp::InZone { zone } if *zone == Zone::Stack))
-            {
-                typed
-                    .properties
-                    .push(FilterProp::InZone { zone: Zone::Stack });
-            }
-            TargetFilter::Typed(typed)
+                    .any(|ty| matches!(ty, TypeFilter::Card)) =>
+        {
+            stack_spell_filter(typed)
         }
+        TargetFilter::Typed(typed) => TargetFilter::Typed(typed),
         TargetFilter::Or { filters } => TargetFilter::Or {
             filters: filters
                 .into_iter()
-                .map(|filter| add_stack_zone_to_spell_targets(filter, scope_all_typed))
+                .map(|filter| scope_spell_targets_to_stack(filter, scope_all_typed))
                 .collect(),
         },
         TargetFilter::And { filters } => TargetFilter::And {
             filters: filters
                 .into_iter()
-                .map(|filter| add_stack_zone_to_spell_targets(filter, scope_all_typed))
+                .map(|filter| scope_spell_targets_to_stack(filter, scope_all_typed))
                 .collect(),
         },
         TargetFilter::Not { filter } => TargetFilter::Not {
-            filter: Box::new(add_stack_zone_to_spell_targets(*filter, scope_all_typed)),
+            filter: Box::new(scope_spell_targets_to_stack(*filter, scope_all_typed)),
         },
         other => other,
+    }
+}
+
+fn stack_spell_filter(mut typed: TypedFilter) -> TargetFilter {
+    typed
+        .type_filters
+        .retain(|ty| !matches!(ty, TypeFilter::Card));
+    typed
+        .properties
+        .retain(|prop| !matches!(prop, FilterProp::InZone { zone } if *zone == Zone::Stack));
+
+    if typed.type_filters.is_empty() && typed.controller.is_none() && typed.properties.is_empty() {
+        TargetFilter::StackSpell
+    } else {
+        TargetFilter::And {
+            filters: vec![TargetFilter::StackSpell, TargetFilter::Typed(typed)],
+        }
     }
 }
 
@@ -4110,6 +4124,30 @@ mod tests {
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::counter::CounterType;
+
+    fn typed_leg(filter: &TargetFilter) -> Option<&TypedFilter> {
+        match filter {
+            TargetFilter::Typed(tf) => Some(tf),
+            TargetFilter::And { filters } => filters.iter().find_map(typed_leg),
+            _ => None,
+        }
+    }
+
+    fn is_stack_spell_leg(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::StackSpell => true,
+            TargetFilter::And { filters } => filters.iter().any(is_stack_spell_leg),
+            _ => false,
+        }
+    }
+
+    fn has_type(tf: &TypedFilter, ty: TypeFilter) -> bool {
+        tf.type_filters.iter().any(|candidate| candidate == &ty)
+    }
+
+    fn has_prop(tf: &TypedFilter, prop: FilterProp) -> bool {
+        tf.properties.iter().any(|candidate| candidate == &prop)
+    }
 
     #[test]
     fn any_target() {
@@ -7409,16 +7447,19 @@ mod tests {
             panic!("Expected Or filter, got {filter:?}");
         };
         assert_eq!(filters.len(), 2);
-        assert!(filters.iter().all(|filter| matches!(
-            filter,
-            TargetFilter::Typed(tf)
-                if tf.properties.iter().any(|prop| matches!(
-                    prop,
-                    FilterProp::AnyOf { props }
-                        if props.contains(&FilterProp::HasColor { color: ManaColor::Red })
-                            && props.contains(&FilterProp::HasColor { color: ManaColor::Green })
-                ))
-        )));
+        assert!(filters.iter().all(|filter| {
+            typed_leg(filter).is_some_and(|tf| {
+                tf.properties.iter().any(|prop| {
+                    matches!(
+                        prop,
+                        FilterProp::AnyOf { props }
+                            if props.iter().any(|prop| prop == &FilterProp::HasColor { color: ManaColor::Red })
+                                && props.iter().any(|prop| prop == &FilterProp::HasColor { color: ManaColor::Green })
+                    )
+                })
+            })
+        }));
+        assert!(filters.iter().any(is_stack_spell_leg));
     }
 
     #[test]
@@ -7836,36 +7877,36 @@ mod tests {
         assert!(filters.iter().any(|filter| matches!(
             filter,
             TargetFilter::Typed(tf)
-                if tf.type_filters.contains(&TypeFilter::Creature)
-                    && tf.properties.contains(&FilterProp::Another)
+                if has_type(tf, TypeFilter::Creature)
+                    && has_prop(tf, FilterProp::Another)
         )));
         assert!(filters.iter().any(|filter| matches!(
             filter,
-            TargetFilter::Typed(tf)
-                if tf.type_filters.contains(&TypeFilter::Card)
-                    && tf.properties.contains(&FilterProp::Another)
-                    && tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
+            TargetFilter::And { filters }
+                if filters.iter().any(|filter| matches!(filter, TargetFilter::StackSpell))
+                    && filters.iter().any(|filter| matches!(
+                        filter,
+                        TargetFilter::Typed(tf)
+                            if has_prop(tf, FilterProp::Another)
+                    ))
         )));
     }
 
     #[test]
-    fn parse_target_spell_or_creature_scopes_spell_leg_to_stack() {
+    fn parse_target_spell_or_creature_uses_stack_spell_leg() {
         let (filter, rest) = parse_target("target spell or creature");
         assert!(rest.trim().is_empty(), "remainder: '{rest}'");
         let TargetFilter::Or { filters } = filter else {
             panic!("Expected Or filter, got {filter:?}");
         };
+        assert!(filters
+            .iter()
+            .any(|filter| matches!(filter, TargetFilter::StackSpell)));
         assert!(filters.iter().any(|filter| matches!(
             filter,
             TargetFilter::Typed(tf)
-                if tf.type_filters.contains(&TypeFilter::Card)
-                    && tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
-        )));
-        assert!(filters.iter().any(|filter| matches!(
-            filter,
-            TargetFilter::Typed(tf)
-                if tf.type_filters.contains(&TypeFilter::Creature)
-                    && !tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
+                if has_type(tf, TypeFilter::Creature)
+                    && !has_prop(tf, FilterProp::InZone { zone: Zone::Stack })
         )));
     }
 
@@ -7879,8 +7920,14 @@ mod tests {
         assert_eq!(filters.len(), 2);
         assert!(filters.iter().all(|filter| matches!(
             filter,
-            TargetFilter::Typed(tf)
-                if tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
+            TargetFilter::And { filters }
+                if filters.iter().any(|filter| matches!(filter, TargetFilter::StackSpell))
+                    && filters.iter().any(|filter| matches!(
+                        filter,
+                        TargetFilter::Typed(tf)
+                            if has_type(tf, TypeFilter::Artifact)
+                                || has_type(tf, TypeFilter::Enchantment)
+                    ))
         )));
     }
 
