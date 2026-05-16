@@ -7424,9 +7424,13 @@ pub enum AbilityCondition {
     AdditionalCostPaidInstead,
     /// CR 608.2c: "If you do" — sub_ability executes only if the parent optional effect was performed.
     IfYouDo,
-    /// CR 603.12: "When you do" — reflexive trigger that always fires when the parent
-    /// (non-optional) effect was performed. Unlike `IfYouDo` which gates on
-    /// `optional_effect_performed`, this is unconditionally true for non-optional parents.
+    /// CR 603.12: "When you do" — reflexive trigger that fires based on whether the
+    /// parent's trigger event actually occurred. For a non-cost parent (e.g. a
+    /// `BecomeCopy` reflexive or a copy/exile replacement sub-ability) the "do"
+    /// always occurred, so this is unconditionally true. For a cost-payment parent
+    /// (`Effect::PayCost`), an unpayable or declined cost is not an occurrence, so
+    /// the reflexive sub-ability is skipped — `evaluate_condition` gates on
+    /// `cost_payment_failed_flag` for that case (mirrors `IfYouDo`).
     WhenYouDo,
     /// CR 603.4: "If you cast it from [zone]" — sub_ability executes only if the spell
     /// was cast from the specified zone. Evaluated against SpellContext.cast_from_zone.

@@ -2634,8 +2634,18 @@ fn evaluate_condition(
         AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes => {
             ability.context.optional_effect_performed && !state.cost_payment_failed_flag
         }
-        // CR 603.12: "When you do" — reflexive trigger that always fires.
-        AbilityCondition::WhenYouDo => true,
+        // CR 603.12: A reflexive triggered ability ("when you do") triggers
+        // "based on whether the trigger event or events occurred earlier during
+        // the resolution" of the parent. For a cost-payment parent
+        // (`Effect::PayCost`), an unpayable or declined cost is NOT a trigger
+        // event occurrence, so the reflexive sub-ability must NOT fire — the
+        // `PayCost` handler signals this via `cost_payment_failed_flag`
+        // (mirrors `IfYouDo` above). For any non-cost parent (e.g. `BecomeCopy`
+        // reflexives, copy/exile replacement sub-abilities) the "do" always
+        // occurred, so the contract remains unconditionally true.
+        AbilityCondition::WhenYouDo => {
+            !(matches!(ability.effect, Effect::PayCost { .. }) && state.cost_payment_failed_flag)
+        }
         // CR 603.4: "If you cast it from [zone]" — check cast origin.
         AbilityCondition::CastFromZone { zone } => ability.context.cast_from_zone == Some(*zone),
         // CR 608.2c: "If it's a [type] card" — check the revealed card's type.
@@ -4202,6 +4212,190 @@ mod tests {
         ));
         assert!(state.pending_optional_effect.is_none());
         assert!(events.is_empty());
+    }
+
+    /// Issue #418 (Guide of Souls): the `WhenYouDo` reflexive sub-ability of a
+    /// `PayCost` parent must NOT run when the embedded `{E}{E}{E}` cost is
+    /// unpayable. CR 603.12: a reflexive trigger fires based on whether the
+    /// trigger event (the cost payment) actually occurred.
+    #[test]
+    fn when_you_do_skipped_when_embedded_energy_cost_unpayable() {
+        let mut state = GameState::new_two_player(42);
+        // Controller has insufficient energy to pay {E}{E}{E}.
+        state.players[0].energy = 0;
+
+        let target = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+
+        let sub = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 2 },
+                // `None` (not `SelfRef`) so the counter resolves against the
+                // explicit chosen target rather than short-circuiting to the
+                // ability's source object.
+                target: TargetFilter::None,
+            },
+            vec![TargetRef::Object(target)],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::WhenYouDo);
+
+        let ability = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: crate::types::ability::PaymentCost::Energy {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                },
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            state.cost_payment_failed_flag,
+            "an unpayable {{E}}{{E}}{{E}} cost must set cost_payment_failed_flag"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::CounterAdded { .. })),
+            "WhenYouDo reflexive sub-ability must NOT run when the embedded cost was unpayable"
+        );
+    }
+
+    /// Issue #418 (Guide of Souls): when the embedded `{E}{E}{E}` cost IS paid,
+    /// the `WhenYouDo` reflexive sub-ability runs and energy is deducted.
+    #[test]
+    fn when_you_do_runs_when_embedded_energy_cost_paid() {
+        let mut state = GameState::new_two_player(42);
+        // Controller has exactly enough energy to pay {E}{E}{E}.
+        state.players[0].energy = 3;
+
+        let target = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+
+        let sub = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 2 },
+                // `None` (not `SelfRef`) so the counter resolves against the
+                // explicit chosen target rather than short-circuiting to the
+                // ability's source object.
+                target: TargetFilter::None,
+            },
+            vec![TargetRef::Object(target)],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::WhenYouDo);
+
+        let ability = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: crate::types::ability::PaymentCost::Energy {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                },
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            !state.cost_payment_failed_flag,
+            "a fully-paid {{E}}{{E}}{{E}} cost must not set cost_payment_failed_flag"
+        );
+        assert_eq!(
+            state.players[0].energy, 0,
+            "paying {{E}}{{E}}{{E}} must deduct all 3 energy"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::EnergyChanged { delta: -3, .. })),
+            "energy payment must emit EnergyChanged delta -3"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::CounterAdded {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: 2,
+                    ..
+                }
+            )),
+            "WhenYouDo reflexive sub-ability must run when the embedded cost was paid"
+        );
+    }
+
+    /// Issue #418 negative control: `WhenYouDo` attached to a non-`PayCost`
+    /// parent (e.g. a `BecomeCopy` reflexive) must STILL fire even when
+    /// `cost_payment_failed_flag` is stale-`true` from an earlier resolution.
+    /// The flag is not reset at `resolve_ability_chain` entry, so the gate
+    /// must be scoped to `Effect::PayCost` parents only — proving the
+    /// parent-effect-type gate protects non-cost reflexives.
+    #[test]
+    fn when_you_do_non_paycost_parent_fires_despite_stale_cost_failed_flag() {
+        let mut state = GameState::new_two_player(42);
+        // Simulate a previous resolution that left the flag set.
+        state.cost_payment_failed_flag = true;
+
+        // A non-cost, non-optional parent: a `BecomeCopy` reflexive parent.
+        let become_copy_parent = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                target: TargetFilter::SelfRef,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        assert!(
+            evaluate_condition(&AbilityCondition::WhenYouDo, &state, &become_copy_parent),
+            "WhenYouDo on a non-PayCost parent must fire even with a stale \
+             cost_payment_failed_flag — the gate is scoped to Effect::PayCost parents"
+        );
+
+        // Sanity check: the same flag DOES gate a PayCost parent.
+        let pay_cost_parent = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: crate::types::ability::PaymentCost::Energy {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                },
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        assert!(
+            !evaluate_condition(&AbilityCondition::WhenYouDo, &state, &pay_cost_parent),
+            "WhenYouDo on a PayCost parent must be suppressed when cost_payment_failed_flag is set"
+        );
     }
 
     #[test]
