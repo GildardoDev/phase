@@ -49,6 +49,7 @@ mod tempt_with_discovery;
 mod timely_ward_regression;
 mod tinybones_joins_up_multi_target;
 mod treasured_find_regression;
+mod twice_instead_repeat_for;
 mod ureni_attack_trigger;
 mod urzas_saga_chapter_two;
 mod virulent_emissary_trigger;

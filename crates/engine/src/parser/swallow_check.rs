@@ -1166,6 +1166,18 @@ fn detect_dynamic_qty(
     {
         return;
     }
+    // CR 608.2c: "<verb> twice instead" (Secrets of the Key, Increasing
+    // Vengeance, every Flashback "twice instead" card) is a count-replacement
+    // instruction whose doubled count is carried by `AbilityDefinition.repeat_for`
+    // — a QuantityExpr home the marker list above does not enumerate because
+    // `repeat_for` is a structural field, not a value-typed `"type":"Ref"` node.
+    // When "twice" is the SOLE dynamic marker and the AST carries a `repeat_for`,
+    // the quantity IS represented; the warning is a false positive.
+    if cleaned_twice_is_only_dynamic_marker(cleaned)
+        && json_has_any(ast_json, &["\"repeat_for\":{"])
+    {
+        return;
+    }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
         detector: "DynamicQty".into(),
         description: truncate(original, 140).into(),
@@ -1187,6 +1199,46 @@ fn cleaned_has_only_counter_multiplier_dynamic(cleaned: &str) -> bool {
         "for each ",
         " twice ",
         "where x is ",
+        "half your ",
+        "half their ",
+        "half its ",
+        "half the ",
+    ]
+    .iter()
+    // allow-noncombinator: swallow detector marker scan on classified text
+    .any(|marker| cleaned.contains(marker))
+}
+
+/// True when " twice " is the ONLY dynamic-quantity marker in `cleaned` (and
+/// is not the "twice each turn" activation-limit form). Used to keep the
+/// `repeat_for` suppression narrow: a card that ALSO carries another dynamic
+/// phrase ("for each", "equal to", "the number of", …) must still flag, since
+/// that second marker may be a genuinely-swallowed clause `repeat_for` does
+/// not account for.
+fn cleaned_twice_is_only_dynamic_marker(cleaned: &str) -> bool {
+    // allow-noncombinator: swallow detector marker scan on classified text
+    let twice_is_activation_limit = cleaned.contains("twice each turn")
+        // allow-noncombinator: swallow detector marker scan on classified text
+        && !cleaned.contains("twice that")
+        // allow-noncombinator: swallow detector marker scan on classified text
+        && !cleaned.contains("twice x");
+    // allow-noncombinator: swallow detector marker scan on classified text
+    let has_twice = cleaned.contains(" twice ") && !twice_is_activation_limit;
+    if !has_twice {
+        return false;
+    }
+    // "twice that many" / "twice x" are multiplier markers, not the plain
+    // repeat count `repeat_for` carries — they need a real QuantityExpr.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if cleaned.contains("twice that") || cleaned.contains("twice x") {
+        return false;
+    }
+    // No OTHER dynamic marker may be present.
+    ![
+        " equal to ",
+        "for each ",
+        "where x is ",
+        "the number of ",
         "half your ",
         "half their ",
         "half its ",
@@ -2333,5 +2385,77 @@ mod tests {
         );
 
         assert!(has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    /// CR 608.2c: "investigate twice instead" — the doubled count is carried
+    /// by `AbilityDefinition.repeat_for`, a legitimate QuantityExpr home. The
+    /// "twice" word must not flag DynamicQty.
+    #[test]
+    fn dynamic_qty_accepts_repeat_for_carrier_secrets_of_the_key() {
+        let parsed = parse_named(
+            "Investigate. If this spell was cast from a graveyard, investigate twice instead. \
+             (Create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")\n\
+             Flashback {3}{U}",
+            "Secrets of the Key",
+            &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    /// CR 608.2c: Increasing Vengeance shares the "copy that spell twice
+    /// instead" shape — same `repeat_for` carrier, same suppression.
+    #[test]
+    fn dynamic_qty_accepts_repeat_for_carrier_increasing_vengeance() {
+        let parsed = parse_named(
+            "Copy target instant or sorcery spell you control. If this spell was cast from a \
+             graveyard, copy that spell twice instead. You may choose new targets for the copies.\n\
+             Flashback {3}{R}{R}",
+            "Increasing Vengeance",
+            &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    /// Negative: the existing counter-multiplier card still flags `DynamicQty`
+    /// when it carries a second swallowed dynamic clause — proves the new
+    /// `repeat_for` suppression did not widen the exemption.
+    /// (See `dynamic_qty_keeps_warning_when_counter_multiplier_card_has_second_dynamic_clause`.)
+    ///
+    /// Helper-level narrowness gate for `cleaned_twice_is_only_dynamic_marker`:
+    /// the `repeat_for` suppression fires ONLY when " twice " is the sole
+    /// dynamic marker. Any second marker, or the "twice that" / "twice x"
+    /// multiplier forms (which need a real `QuantityExpr`, not a repeat count),
+    /// must keep the warning live even if a `repeat_for` is also present.
+    #[test]
+    fn twice_is_only_dynamic_marker_gate() {
+        // Plain "twice" with no other marker — the suppression-eligible case.
+        assert!(super::cleaned_twice_is_only_dynamic_marker(
+            "investigate. if this spell was cast from a graveyard, investigate twice instead."
+        ));
+        // "twice that" is a multiplier — needs a real QuantityExpr.
+        assert!(!super::cleaned_twice_is_only_dynamic_marker(
+            "they lose twice that much life instead."
+        ));
+        // "twice x" is a multiplier.
+        assert!(!super::cleaned_twice_is_only_dynamic_marker(
+            "deal damage equal to twice x to any target."
+        ));
+        // A second dynamic marker present — must not be suppression-eligible.
+        assert!(!super::cleaned_twice_is_only_dynamic_marker(
+            "investigate twice instead, then draw cards equal to your life total."
+        ));
+        assert!(!super::cleaned_twice_is_only_dynamic_marker(
+            "investigate twice instead and create a token for each creature you control."
+        ));
+        // "twice each turn" alone is the activation-limit form, not dynamic.
+        assert!(!super::cleaned_twice_is_only_dynamic_marker(
+            "activate this ability only twice each turn."
+        ));
+        // No "twice" at all.
+        assert!(!super::cleaned_twice_is_only_dynamic_marker(
+            "draw a card for each creature you control."
+        ));
     }
 }
