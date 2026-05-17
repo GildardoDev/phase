@@ -4526,6 +4526,20 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         return Some((TriggerMode::FullyUnlock, def));
     }
 
+    fn parse_this_card_becomes_plotted(input: &str) -> OracleResult<'_, ()> {
+        all_consuming(preceded(
+            alt((tag("when "), tag("whenever "))),
+            value((), tag("this card becomes plotted")),
+        ))
+        .parse(input)
+    }
+    if parse_this_card_becomes_plotted(lower).is_ok() {
+        let mut def = make_base();
+        def.mode = TriggerMode::BecomesPlotted;
+        def.trigger_zones = vec![Zone::Exile];
+        return Some((TriggerMode::BecomesPlotted, def));
+    }
+
     // CR 701.62 + CR 701.62b: "Whenever you manifest dread" — actor-side
     // Manifest Dread trigger. "You" constrains the acting player to the
     // trigger's controller via `TargetFilter::Controller`.
@@ -12272,6 +12286,22 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 destination: None,
             })
+        ));
+    }
+
+    #[test]
+    fn trigger_this_card_becomes_plotted_uses_exile_zone() {
+        let def = parse_trigger_line(
+            "When this card becomes plotted, it deals 2 damage to any target.",
+            "Aloe Alchemist",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesPlotted);
+        assert_eq!(def.trigger_zones, vec![Zone::Exile]);
+        assert!(matches!(
+            def.execute
+                .as_deref()
+                .map(|ability| ability.effect.as_ref()),
+            Some(Effect::DealDamage { .. })
         ));
     }
 

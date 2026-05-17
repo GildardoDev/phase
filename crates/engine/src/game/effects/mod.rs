@@ -3451,6 +3451,7 @@ mod tests {
         QuantityExpr, QuantityRef, SpellContext, StaticDefinition, TargetFilter, TargetRef,
         TypeFilter, TypedFilter,
     };
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
@@ -6079,6 +6080,107 @@ mod tests {
             state.pending_repeat_iteration.is_none(),
             "loop must clear pending_repeat_iteration after final iteration completes"
         );
+    }
+
+    #[test]
+    fn effect_zone_choice_publishes_chosen_cards_for_plotted_continuation() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 1;
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Make Your Own Luck".to_string(),
+            Zone::Battlefield,
+        );
+        let first = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "First Card".to_string(),
+            Zone::Library,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Second Card".to_string(),
+            Zone::Library,
+        );
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state
+            .tracked_object_sets
+            .insert(set_id, vec![first, second]);
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            player: PlayerId(0),
+            cards: vec![first, second],
+            count: 1,
+            min_count: 0,
+            up_to: false,
+            source_id: source,
+            effect_kind: EffectKind::ChangeZone,
+            zone: Zone::Library,
+            destination: Some(Zone::Exile),
+            enter_tapped: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enters_attacking: false,
+            owner_library: false,
+        };
+        state.pending_continuation =
+            Some(PendingContinuation::new(Box::new(ResolvedAbility::new(
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::Plotted { turn_plotted: 0 },
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                    grantee: PermissionGrantee::ObjectOwner,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            ))));
+        let mut events = Vec::new();
+
+        let _outcome = crate::game::engine_resolution_choices::handle_resolution_choice(
+            &mut state,
+            WaitingFor::EffectZoneChoice {
+                player: PlayerId(0),
+                cards: vec![first, second],
+                count: 1,
+                min_count: 0,
+                up_to: false,
+                source_id: source,
+                effect_kind: EffectKind::ChangeZone,
+                zone: Zone::Library,
+                destination: Some(Zone::Exile),
+                enter_tapped: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enters_attacking: false,
+                owner_library: false,
+            },
+            GameAction::SelectCards {
+                cards: vec![second],
+            },
+            &mut events,
+        )
+        .unwrap();
+
+        assert_eq!(state.objects[&second].zone, Zone::Exile);
+        assert_eq!(
+            state.objects[&second].casting_permissions,
+            vec![CastingPermission::Plotted { turn_plotted: 1 }]
+        );
+        assert!(state.objects[&first].casting_permissions.is_empty());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::BecomesPlotted {
+                object_id,
+                player_id: PlayerId(0)
+            } if *object_id == second
+        )));
     }
 
     /// CR 609.3 + CR 109.5 + CR 701.23i: End-to-end Winds of Abandon shape —

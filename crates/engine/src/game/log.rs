@@ -152,7 +152,8 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::PowerToughnessChanged { .. }
         | GameEvent::VehicleCrewed { .. }
         | GameEvent::Stationed { .. }
-        | GameEvent::Saddled { .. } => LogCategory::State,
+        | GameEvent::Saddled { .. }
+        | GameEvent::BecomesPlotted { .. } => LogCategory::State,
 
         GameEvent::SpeedChanged { .. } => LogCategory::Special,
 
@@ -261,6 +262,15 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_seg(state, *player_id),
             text(" activates boast: "),
             card_seg(state, *source_id),
+        ],
+
+        GameEvent::BecomesPlotted {
+            object_id,
+            player_id,
+        } => vec![
+            card_seg(state, *object_id),
+            text(" becomes plotted for "),
+            player_seg(state, *player_id),
         ],
 
         GameEvent::StackPushed { object_id } => {

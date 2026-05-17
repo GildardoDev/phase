@@ -114,6 +114,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::Earthbend => match_earthbend,
         TriggerMode::Waterbend => match_waterbend,
         TriggerMode::ElementalBend => match_elemental_bend,
+        TriggerMode::BecomesPlotted => match_becomes_plotted,
         TriggerMode::DamagePreventedOnce
         | TriggerMode::AbilityCast
         | TriggerMode::AbilityResolves
@@ -159,8 +160,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::SetInMotion
         | TriggerMode::Specializes
         | TriggerMode::Trains
-        | TriggerMode::VisitAttraction
-        | TriggerMode::BecomesPlotted => match_unimplemented,
+        | TriggerMode::VisitAttraction => match_unimplemented,
         // CR 603.8: State triggers are not event-based — they are checked separately
         // in the priority pipeline, not through the event-matching trigger system.
         TriggerMode::StateCondition => return None,
@@ -315,6 +315,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::RoomEntered, match_room_entered);
     r.insert(TriggerMode::UnlockDoor, match_unlock_door);
     r.insert(TriggerMode::FullyUnlock, match_fully_unlock);
+    r.insert(TriggerMode::BecomesPlotted, match_becomes_plotted);
     // CR 725: Initiative triggers
     r.insert(TriggerMode::TakesInitiative, match_takes_initiative);
 
@@ -388,7 +389,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::Trains,
         TriggerMode::VisitAttraction,
         // TriggerMode::BecomesCrewed — moved to real matcher below
-        TriggerMode::BecomesPlotted,
+        // TriggerMode::BecomesPlotted — moved to real matcher above
         // TriggerMode::BecomesSaddled — moved to real matcher below
     ];
 
@@ -2142,6 +2143,24 @@ pub(super) fn match_fully_unlock(
     }
 }
 
+/// CR 702.170c-d: Match "when this card becomes plotted" while the source is in exile.
+pub(super) fn match_becomes_plotted(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::BecomesPlotted {
+        object_id,
+        player_id,
+    } = event
+    {
+        *object_id == source_id && valid_player_matches(trigger, state, *player_id, source_id)
+    } else {
+        false
+    }
+}
+
 /// CR 725.2: Match "takes the initiative" events.
 pub(super) fn match_takes_initiative(
     event: &GameEvent,
@@ -2550,6 +2569,45 @@ mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    #[test]
+    fn becomes_plotted_matches_only_source_card() {
+        let mut state = setup();
+        let plotted = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Aloe Alchemist".to_string(),
+            Zone::Exile,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other Card".to_string(),
+            Zone::Exile,
+        );
+        let trigger = make_trigger(TriggerMode::BecomesPlotted);
+
+        assert!(match_becomes_plotted(
+            &GameEvent::BecomesPlotted {
+                object_id: plotted,
+                player_id: PlayerId(0),
+            },
+            &trigger,
+            plotted,
+            &state
+        ));
+        assert!(!match_becomes_plotted(
+            &GameEvent::BecomesPlotted {
+                object_id: other,
+                player_id: PlayerId(0),
+            },
+            &trigger,
+            plotted,
+            &state
+        ));
     }
 
     #[test]

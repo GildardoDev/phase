@@ -9,7 +9,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActionResult, ChosenDamageSource, GameState, PayableResource, PendingContinuation, WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
 use crate::types::zones::Zone;
 
@@ -1314,6 +1314,16 @@ pub(super) fn handle_resolution_choice(
                 if let Some(cont) = state.pending_continuation.as_mut() {
                     cont.chain.set_effect_context_object_recursive(snapshot);
                 }
+            }
+            if matches!(
+                effect_kind,
+                EffectKind::ChangeZone | EffectKind::BounceAll | EffectKind::PutAtLibraryPosition
+            ) && state.pending_continuation.is_some()
+            {
+                let tracked_id = TrackedSetId(state.next_tracked_set_id);
+                state.next_tracked_set_id += 1;
+                state.tracked_object_sets.insert(tracked_id, chosen.clone());
+                state.chain_tracked_set_id = Some(tracked_id);
             }
             state.last_effect_count = Some(chosen.len() as i32);
             events.push(GameEvent::EffectResolved {

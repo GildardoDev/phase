@@ -3842,6 +3842,34 @@ pub(super) fn parse_exile_ast(
         }
     }
 
+    // CR 608.2c: "exile a nonland card from among them" selects from the
+    // previous effect's published set, then moves that selected card to exile.
+    // The destination is the effect's job; the origin is intentionally open
+    // because the tracked set already identifies the exact object(s).
+    if let Ok((after_among, (_, filter_text))) = (
+        opt(nom_primitives::parse_article),
+        terminated(
+            take_until(" from among "),
+            alt((tag(" from among them"), tag(" from among those cards"))),
+        ),
+    )
+        .parse(rest_lower)
+    {
+        let (target, rem) = parse_type_phrase(filter_text.trim());
+        let tail_clean = after_among.trim().trim_start_matches('.').trim(); // allow-noncombinator: punctuation cleanup after typed terminator
+        if rem.trim().is_empty() && !matches!(target, TargetFilter::Any) && tail_clean.is_empty() {
+            return Some(ZoneCounterImperativeAst::Exile {
+                origin: None,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                    filter: Box::new(target),
+                },
+                all: false,
+                enter_with_counters: vec![],
+            });
+        }
+    }
+
     // CR 608.2k: thread `ctx` through so bare "it"/"them" anaphors in trigger
     // bodies ("Whenever an Elf you control dies, exile it") bind to the
     // triggering subject via `resolve_pronoun_target`, not the ability source.

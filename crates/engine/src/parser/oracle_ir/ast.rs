@@ -239,6 +239,8 @@ pub(crate) enum ContinuationAst {
     /// "Put those cards on top ..." after a search/dig/choice producer.
     /// Count is supplied by the already-selected target set.
     PutChosenCardsAtLibraryPosition { position: LibraryPosition },
+    /// CR 702.170c-d: "It/that card/they become plotted" after an exile effect.
+    BecomesPlotted,
     /// "Put the rest on the bottom/into your graveyard" after Dig/RevealTop —
     /// sets `rest_destination` on the preceding Dig effect. The destination is
     /// parsed from the text (bottom of library, graveyard, hand, etc.).

@@ -1234,6 +1234,7 @@ export type GameEvent =
   | { type: "CreatureExploited"; data: { exploiter: ObjectId; sacrificed: ObjectId } }
   | { type: "PowerToughnessChanged"; data: { object_id: ObjectId; power: number; toughness: number; power_delta: number; toughness_delta: number } }
   | { type: "RoomEntered"; data: { player_id: PlayerId; dungeon: DungeonId; room_index: number; room_name: string } }
+  | { type: "BecomesPlotted"; data: { object_id: ObjectId; player_id: PlayerId } }
   | { type: "DungeonCompleted"; data: { player_id: PlayerId; dungeon: DungeonId } }
   | { type: "InitiativeTaken"; data: { player_id: PlayerId } }
   | { type: "DebugActionUsed"; data: { player_id: PlayerId; description: string } }

@@ -15213,7 +15213,7 @@ mod tests {
         AbilityCondition, CardTypeSetSource, CastVariantPaid, ChoiceType, Comparator,
         ContinuousModification, ControllerRef, CopyRetargetPermission, CountScope, DoublePTMode,
         Duration, FilterProp, GainLifePlayer, LibraryPosition, LinkedExileScope, ManaContribution,
-        ManaProduction, ObjectScope, PaymentCost, QuantityExpr, QuantityRef,
+        ManaProduction, ObjectScope, PaymentCost, PermissionGrantee, QuantityExpr, QuantityRef,
         SearchSelectionConstraint, TypeFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
@@ -22290,6 +22290,65 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parse_exile_target_spell_then_it_becomes_plotted() {
+        let def = parse_effect_chain(
+            "Exile target spell. It becomes plotted.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            def.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ));
+
+        let grant = def.sub_ability.as_deref().expect("plot grant sub-ability");
+        let Effect::GrantCastingPermission {
+            permission,
+            target,
+            grantee,
+        } = grant.effect.as_ref()
+        else {
+            panic!("expected GrantCastingPermission, got {:?}", grant.effect);
+        };
+        assert_eq!(*permission, CastingPermission::Plotted { turn_plotted: 0 });
+        assert_eq!(*target, TargetFilter::ParentTarget);
+        assert_eq!(*grantee, PermissionGrantee::ObjectOwner);
+    }
+
+    #[test]
+    fn parse_exile_card_from_among_them_then_it_becomes_plotted() {
+        let def = parse_effect_chain(
+            "You may exile a nonland card from among them. It becomes plotted.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            def.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::TrackedSetFiltered { .. },
+                ..
+            }
+        ));
+
+        let grant = def.sub_ability.as_deref().expect("plot grant sub-ability");
+        let Effect::GrantCastingPermission {
+            permission, target, ..
+        } = grant.effect.as_ref()
+        else {
+            panic!("expected GrantCastingPermission, got {:?}", grant.effect);
+        };
+        assert_eq!(*permission, CastingPermission::Plotted { turn_plotted: 0 });
+        assert_eq!(
+            *target,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
     }
 
     #[test]

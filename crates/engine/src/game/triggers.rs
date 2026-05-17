@@ -3863,6 +3863,47 @@ pub mod tests {
     }
 
     #[test]
+    fn becomes_plotted_trigger_fires_from_exile() {
+        let mut state = setup();
+        let player = PlayerId(0);
+        let plotted = create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Aloe Alchemist".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&plotted).unwrap();
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::BecomesPlotted)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    ))
+                    .trigger_zones(vec![Zone::Exile]),
+            );
+        }
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::BecomesPlotted {
+                object_id: plotted,
+                player_id: player,
+            }],
+        );
+
+        assert!(state.stack.iter().any(|entry| matches!(
+            &entry.kind,
+            StackEntryKind::TriggeredAbility { ability, .. }
+                if matches!(&ability.effect, Effect::Draw { .. })
+        )));
+    }
+
+    #[test]
     fn ravenous_draw_triggers_when_paid_x_is_five_or_more() {
         let mut state = setup();
         let player = PlayerId(0);

@@ -456,6 +456,11 @@ pub enum GameEvent {
         door: crate::game::game_object::RoomDoor,
         fully_unlocked: bool,
     },
+    /// CR 702.170c-d: A card in exile became plotted for the specified player.
+    BecomesPlotted {
+        object_id: ObjectId,
+        player_id: PlayerId,
+    },
     /// CR 309.7: A player completed a dungeon (removed from game).
     DungeonCompleted {
         player_id: PlayerId,

@@ -14,8 +14,8 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Chooser, CopyRetargetPermission, Effect, LibraryPosition,
-    QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
+    AbilityDefinition, AbilityKind, CastingPermission, Chooser, CopyRetargetPermission, Effect,
+    LibraryPosition, PermissionGrantee, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -265,6 +265,42 @@ fn append_definition_to_sub_chain(ability: &mut AbilityDefinition, next: Ability
             .expect("sub_ability checked above")
             .as_mut();
     }
+}
+
+fn deepest_effect(ability: &AbilityDefinition) -> &Effect {
+    let mut cursor = ability;
+    while let Some(sub) = cursor.sub_ability.as_deref() {
+        cursor = sub;
+    }
+    &cursor.effect
+}
+
+fn plotted_grant_target(previous: &AbilityDefinition) -> TargetFilter {
+    match deepest_effect(previous) {
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            target: TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. },
+            ..
+        } => TargetFilter::TrackedSet {
+            id: crate::types::identifiers::TrackedSetId(0),
+        },
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        } => TargetFilter::ParentTarget,
+        _ => TargetFilter::ParentTarget,
+    }
+}
+
+fn parse_becomes_plotted_continuation(lower: &str) -> bool {
+    let text = lower.trim().trim_end_matches('.').trim(); // allow-noncombinator: punctuation cleanup before all_consuming
+    all_consuming(alt((
+        value((), tag::<_, _, OracleError<'_>>("it becomes plotted")),
+        value((), tag("that card becomes plotted")),
+        value((), tag("they become plotted")),
+    )))
+    .parse(text)
+    .is_ok()
 }
 
 fn parse_put_all_back_in_any_order(lower: &str) -> bool {
@@ -1462,6 +1498,20 @@ pub(super) fn apply_clause_continuation(
             );
             append_definition_to_sub_chain(previous, put_def);
         }
+        ContinuationAst::BecomesPlotted => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            let grant_def = AbilityDefinition::new(
+                kind,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::Plotted { turn_plotted: 0 },
+                    target: plotted_grant_target(previous),
+                    grantee: PermissionGrantee::ObjectOwner,
+                },
+            );
+            append_definition_to_sub_chain(previous, grant_def);
+        }
         ContinuationAst::EntersTappedAttacking => {
             let Some(previous) = defs.last_mut() else {
                 return;
@@ -1645,6 +1695,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::PutChoiceRemainderOnBottom => true,
         ContinuationAst::ChoicePartitionDestinations { .. } => true,
         ContinuationAst::PutChosenCardsAtLibraryPosition { .. } => true,
+        ContinuationAst::BecomesPlotted => true,
         ContinuationAst::EntersTappedAttacking => true,
         ContinuationAst::TokenEntersWithCounters { .. } => true,
         ContinuationAst::DigFromAmong { .. } => true,
@@ -2026,6 +2077,11 @@ pub(super) fn parse_followup_continuation_ast(
                 position: parse_put_chosen_cards_at_library_position(&lower)
                     .expect("guard parsed position"),
             })
+        }
+        Effect::ChangeZone { .. } | Effect::ChooseFromZone { .. }
+            if parse_becomes_plotted_continuation(&lower) =>
+        {
+            Some(ContinuationAst::BecomesPlotted)
         }
         // "Exile the rest" after Dig — sets rest_destination on the preceding
         // looked-at pile while preserving any prior kept-card destination.
