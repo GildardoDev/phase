@@ -1601,6 +1601,51 @@ pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
         .collect()
 }
 
+/// CR 508.1a / CR 509.1a: Rebuild the eligibility snapshot carried by the
+/// `DeclareAttackers` / `DeclareBlockers` waiting states from the live game
+/// queries. The declare-step waiting payloads are computed exactly once by
+/// `turns::auto_advance` when combat enters the step, but a mid-step state
+/// mutation (notably debug actions that flip summoning sickness — CR 302.6 —
+/// tapped status, or grant/remove Haste/Defender) can change which creatures
+/// are legal attackers/blockers. Re-deriving the payload mirrors the
+/// `turns.rs` declare-step arms so there is a single authority for the payload
+/// shape. A no-op for every non-declaration `WaitingFor` variant.
+pub fn refresh_combat_declaration_waiting_for(state: &mut GameState) {
+    match &state.waiting_for {
+        crate::types::game_state::WaitingFor::DeclareAttackers { .. } => {
+            // CR 508.1a: Mirror turns.rs:1369-1370 — rebuild both payload fields.
+            let valid_attacker_ids = get_valid_attacker_ids(state);
+            let valid_attack_targets = get_valid_attack_targets(state);
+            if let crate::types::game_state::WaitingFor::DeclareAttackers {
+                valid_attacker_ids: ids,
+                valid_attack_targets: targets,
+                ..
+            } = &mut state.waiting_for
+            {
+                *ids = valid_attacker_ids;
+                *targets = valid_attack_targets;
+            }
+        }
+        crate::types::game_state::WaitingFor::DeclareBlockers { player, .. } => {
+            // Copy `player` out before the immutable-borrowing queries below.
+            let player = *player;
+            // CR 509.1a: Mirror turns.rs:1394-1396 — player-scoped block targets.
+            let valid_block_targets = get_valid_block_targets_for_player(state, player);
+            let valid_blocker_ids: Vec<_> = valid_block_targets.keys().copied().collect();
+            if let crate::types::game_state::WaitingFor::DeclareBlockers {
+                valid_blocker_ids: ids,
+                valid_block_targets: targets,
+                ..
+            } = &mut state.waiting_for
+            {
+                *ids = valid_blocker_ids;
+                *targets = valid_block_targets;
+            }
+        }
+        _ => {}
+    }
+}
+
 /// CR 702.14c: A creature with landwalk can't be blocked as long as the defending
 /// player controls a land with the matching type/supertype. The `Keyword::Landwalk`
 /// variant's inner string is the qualifier: basic land subtypes ("Plains", "Island",
@@ -2215,6 +2260,131 @@ mod tests {
         obj.entered_battlefield_turn = Some(2);
         obj.summoning_sick = true;
         assert!(validate_attackers(&state, &[id]).is_err());
+    }
+
+    /// Issue #428 — CR 302.6 / CR 508.1a: A debug `SetSummoningSickness { sick:
+    /// false }` applied while paused at `DeclareAttackers` must refresh the
+    /// frozen `valid_attacker_ids` snapshot so the creature becomes a legal
+    /// attacker. Drives the real `engine::apply` → `apply_debug_action` →
+    /// `refresh_combat_declaration_waiting_for` pipeline. FAILS on pre-fix code:
+    /// the snapshot stays stale and the creature is never surfaced.
+    #[test]
+    fn debug_clear_summoning_sickness_refreshes_valid_attackers() {
+        use crate::types::actions::{DebugAction, GameAction};
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = setup();
+        state.debug_mode = true;
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+        state.priority_player = PlayerId(0);
+        state.combat = Some(CombatState::default());
+
+        // Summoning-sick creature controlled by the active player.
+        let id = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        state.objects.get_mut(&id).unwrap().summoning_sick = true;
+
+        // Build the DeclareAttackers waiting state exactly as the engine does
+        // (turns.rs:1369-1370): the creature is sick, so the snapshot is empty.
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: get_valid_attacker_ids(&state),
+            valid_attack_targets: get_valid_attack_targets(&state),
+        };
+        match &state.waiting_for {
+            WaitingFor::DeclareAttackers {
+                valid_attacker_ids, ..
+            } => assert!(
+                !valid_attacker_ids.contains(&id),
+                "precondition: sick creature must not be a valid attacker yet"
+            ),
+            other => panic!("expected DeclareAttackers, got {other:?}"),
+        }
+
+        // Lift summoning sickness via the debug pipeline.
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::SetSummoningSickness {
+                object_id: id,
+                sick: false,
+            }),
+        )
+        .expect("debug SetSummoningSickness should succeed");
+
+        match &result.waiting_for {
+            WaitingFor::DeclareAttackers {
+                valid_attacker_ids, ..
+            } => assert!(
+                valid_attacker_ids.contains(&id),
+                "refreshed snapshot must surface the no-longer-sick creature"
+            ),
+            other => panic!("expected refreshed DeclareAttackers, got {other:?}"),
+        }
+
+        // The creature can now actually be declared as an attacker.
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DeclareAttackers {
+                attacks: vec![(id, AttackTarget::Player(PlayerId(1)))],
+            },
+        )
+        .expect("declaring the no-longer-sick creature should succeed");
+    }
+
+    /// Issue #428 negative control — CR 302.6 / CR 508.1a: the refresh is
+    /// bidirectional. A debug `SetSummoningSickness { sick: true }` on an
+    /// otherwise-eligible creature must REMOVE it from the refreshed
+    /// `valid_attacker_ids`, proving the refresh re-derives the live snapshot
+    /// rather than one-way unlocking.
+    #[test]
+    fn debug_set_summoning_sickness_removes_from_valid_attackers() {
+        use crate::types::actions::{DebugAction, GameAction};
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = setup();
+        state.debug_mode = true;
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+        state.priority_player = PlayerId(0);
+        state.combat = Some(CombatState::default());
+
+        // Non-sick, eligible creature (create_creature leaves summoning_sick false).
+        let id = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: get_valid_attacker_ids(&state),
+            valid_attack_targets: get_valid_attack_targets(&state),
+        };
+        match &state.waiting_for {
+            WaitingFor::DeclareAttackers {
+                valid_attacker_ids, ..
+            } => assert!(
+                valid_attacker_ids.contains(&id),
+                "precondition: eligible creature must be a valid attacker"
+            ),
+            other => panic!("expected DeclareAttackers, got {other:?}"),
+        }
+
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::SetSummoningSickness {
+                object_id: id,
+                sick: true,
+            }),
+        )
+        .expect("debug SetSummoningSickness should succeed");
+
+        match &result.waiting_for {
+            WaitingFor::DeclareAttackers {
+                valid_attacker_ids, ..
+            } => assert!(
+                !valid_attacker_ids.contains(&id),
+                "refreshed snapshot must drop the now-sick creature"
+            ),
+            other => panic!("expected refreshed DeclareAttackers, got {other:?}"),
+        }
     }
 
     #[test]

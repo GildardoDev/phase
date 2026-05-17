@@ -328,6 +328,13 @@ pub fn apply_debug_action(
         }
     }
 
+    // CR 508.1a / CR 509.1a: A debug mutation can change attacker/blocker
+    // eligibility (summoning sickness, tapped status, Haste/Defender) while the
+    // engine is paused mid-declare-step. Re-derive the declare-step eligibility
+    // snapshot so the refreshed payload is captured by the `ActionResult` below.
+    // A genuine no-op for all non-declaration waiting states.
+    super::combat::refresh_combat_declaration_waiting_for(state);
+
     Ok(ActionResult {
         events: std::mem::take(events),
         waiting_for: state.waiting_for.clone(),
