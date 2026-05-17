@@ -14443,6 +14443,99 @@ mod tests {
         );
     }
 
+    /// Issue #466 — CR 608.2c: a special (rider) clause occupies a chunk slot
+    /// and carries its own trailing boundary. A normal clause that follows a
+    /// special clause must stamp its `sub_link` from the boundary AFTER the
+    /// special clause, not from the stale boundary that preceded it.
+    ///
+    /// Direct-IR construction tests the boundary-advance building block in
+    /// isolation: clause 0 normal (`boundary: Comma`), clause 1
+    /// `SpecialClause::Otherwise` (`boundary: Sentence`), clause 2 normal.
+    /// With the bug, clause 2 inherits clause 0's `Comma` → `ContinuationStep`;
+    /// with the fix it inherits clause 1's `Sentence` → `SequentialSibling`.
+    #[test]
+    fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
+        use crate::parser::oracle_ir::ast::{parsed_clause, ClauseBoundary};
+        use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
+        use crate::types::ability::SubAbilityLink;
+
+        fn make_clause(
+            effect: Effect,
+            boundary: Option<ClauseBoundary>,
+            special: Option<SpecialClause>,
+        ) -> ClauseIr {
+            ClauseIr {
+                parsed: parsed_clause(effect),
+                boundary,
+                condition: None,
+                is_optional: false,
+                opponent_may_scope: None,
+                repeat_for: None,
+                player_scope: None,
+                delayed_condition: None,
+                prefix_delayed_condition: None,
+                intrinsic_continuation: None,
+                followup_continuation: None,
+                absorbed_by_followup: false,
+                multi_target: None,
+                where_x_expression: None,
+                is_otherwise: false,
+                unless_pay: None,
+                special,
+                source_text: String::new(),
+                target_selection_mode: Default::default(),
+            }
+        }
+
+        let draw_one = || Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        };
+        // `SpecialClause::Otherwise` is a silent no-op when no prior conditional
+        // def exists, so clause 0 needs no condition.
+        let otherwise_def = Box::new(crate::types::ability::AbilityDefinition::new(
+            AbilityKind::Spell,
+            draw_one(),
+        ));
+
+        let ir = EffectChainIr {
+            clauses: vec![
+                // clause 0: normal, trailing boundary = Comma
+                make_clause(draw_one(), Some(ClauseBoundary::Comma), None),
+                // clause 1: SpecialClause::Otherwise, trailing boundary = Sentence
+                make_clause(
+                    draw_one(),
+                    Some(ClauseBoundary::Sentence),
+                    Some(SpecialClause::Otherwise(otherwise_def)),
+                ),
+                // clause 2: normal — must stamp sub_link from clause 1's Sentence
+                make_clause(draw_one(), None, None),
+            ],
+            kind: AbilityKind::Spell,
+            chain_rounding: None,
+            actor: None,
+            repeat_until: None,
+        };
+
+        let root = lower_effect_chain_ir(&ir);
+        // clause 0 → root def; clause 1 special (no-op); clause 2 → trailing sibling.
+        let trailing = root
+            .sub_ability
+            .as_ref()
+            .expect("clause 2 should lower to a trailing sub_ability def");
+        assert_eq!(
+            trailing.sub_link,
+            SubAbilityLink::SequentialSibling,
+            "clause after a special clause must inherit the boundary AFTER the \
+             special clause (Sentence → SequentialSibling)"
+        );
+        assert_ne!(
+            trailing.sub_link,
+            SubAbilityLink::ContinuationStep,
+            "regression guard: must NOT inherit clause 0's stale Comma boundary"
+        );
+    }
+
     #[test]
     fn trigger_subject_predicate_it_gains() {
         // "it gains haste" — subject-predicate with "it" as subject.

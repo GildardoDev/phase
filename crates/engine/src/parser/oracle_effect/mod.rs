@@ -11324,219 +11324,237 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // `Comma`/`Then`/no boundary makes it a within-clause `ContinuationStep`.
     let mut prev_boundary: Option<ClauseBoundary> = None;
     for clause_ir in &ir.clauses {
-        // Skip absorbed clauses — their followup continuation is applied below.
-        if clause_ir.absorbed_by_followup {
-            // Apply the followup continuation to the defs built so far.
-            if let Some(ref continuation) = clause_ir.followup_continuation {
-                apply_clause_continuation(&mut defs, continuation.clone(), kind);
-            }
-            continue;
-        }
-
-        // Handle special clauses that modify previous defs rather than emitting new ones.
-        if let Some(ref special) = clause_ir.special {
-            match special {
-                SpecialClause::AltCostRider(cost) => {
-                    attach_alt_cost_to_prior_cast_from_zone(&mut defs, cost.clone());
-                    continue;
+        // CR 608.2c: Handle absorbed clauses and special (rider) clauses that
+        // modify previous defs rather than emitting new sibling defs. Each path
+        // evaluates to `true`; the boundary advance below then runs uniformly so
+        // a following normal clause stamps `sub_link` from the correct boundary.
+        let handled_as_special: bool = {
+            if clause_ir.absorbed_by_followup {
+                // Apply the followup continuation to the defs built so far.
+                if let Some(ref continuation) = clause_ir.followup_continuation {
+                    apply_clause_continuation(&mut defs, continuation.clone(), kind);
                 }
-                SpecialClause::Otherwise(else_def) => {
-                    // Walk defs backward to find the most recent conditional
-                    for d in defs.iter_mut().rev() {
-                        if d.condition.is_some() {
-                            d.else_ability = Some(else_def.clone());
-                            break;
-                        }
+                true
+            } else if let Some(ref special) = clause_ir.special {
+                match special {
+                    SpecialClause::AltCostRider(cost) => {
+                        attach_alt_cost_to_prior_cast_from_zone(&mut defs, cost.clone());
+                        true
                     }
-                    continue;
-                }
-                SpecialClause::OtherwiseFallback(else_def) => {
-                    defs.push(AbilityDefinition::new(
-                        kind,
-                        Effect::Unimplemented {
-                            name: "otherwise".to_string(),
-                            description: Some("Otherwise".to_string()),
-                        },
-                    ));
-                    defs.push(*else_def.clone());
-                    continue;
-                }
-                SpecialClause::DieExileRider(rider_def) => {
-                    if let Some(last_def) = defs.last_mut() {
-                        // CR 614.1a + CR 608.2c: Append the rider as the
-                        // tail of the existing sub_ability chain instead of
-                        // overwriting it. Multi-target damage spells
-                        // (Serpentine Spike) populate the sub_ability chain
-                        // with continuation damage events; the rider must
-                        // attach AFTER the chain so all continuation events
-                        // resolve before the replacement attaches.
-                        append_to_deepest_sub_ability(last_def, Some(rider_def.clone()));
-                    }
-                    continue;
-                }
-                SpecialClause::DigInsteadAlt(alt_def) => {
-                    if let Some(last_def) = defs.pop() {
-                        let mut new_def = *alt_def.clone();
-                        new_def.else_ability = Some(Box::new(last_def));
-                        defs.push(new_def);
-                    }
-                    continue;
-                }
-                SpecialClause::InsteadClause(instead_def) => {
-                    if let Some(mut last_def) = defs.pop() {
-                        let mut instead = *instead_def.clone();
-                        // CR 702.33d + CR 707.10: Resolve "create N of those tokens" anaphor
-                        rewrite_those_tokens_from_antecedent(&mut instead.effect, &last_def.effect);
-                        last_def.sub_ability = Some(Box::new(instead));
-                        defs.push(last_def);
-                    }
-                    continue;
-                }
-                SpecialClause::EntersTappedAttacking => {
-                    // CR 508.4 / CR 614.1: Conditional enters-tapped-attacking modifier
-                    if let Some(prev) = defs.last() {
-                        let can_patch = matches!(
-                            &*prev.effect,
-                            Effect::CopyTokenOf { .. }
-                                | Effect::Token { .. }
-                                | Effect::ChangeZone { .. }
-                        );
-                        if can_patch {
-                            let mut patched = defs.pop().unwrap();
-                            match &mut *patched.effect {
-                                Effect::CopyTokenOf {
-                                    enters_attacking,
-                                    tapped,
-                                    ..
-                                } => {
-                                    *enters_attacking = true;
-                                    *tapped = true;
-                                }
-                                Effect::Token {
-                                    enters_attacking,
-                                    tapped,
-                                    ..
-                                } => {
-                                    *enters_attacking = true;
-                                    *tapped = true;
-                                }
-                                Effect::ChangeZone {
-                                    enters_attacking,
-                                    enter_tapped,
-                                    ..
-                                } => {
-                                    *enters_attacking = true;
-                                    *enter_tapped = true;
-                                }
-                                _ => {}
+                    SpecialClause::Otherwise(else_def) => {
+                        // Walk defs backward to find the most recent conditional
+                        for d in defs.iter_mut().rev() {
+                            if d.condition.is_some() {
+                                d.else_ability = Some(else_def.clone());
+                                break;
                             }
-                            let original = {
-                                let mut orig = patched.clone();
-                                match &mut *orig.effect {
+                        }
+                        true
+                    }
+                    SpecialClause::OtherwiseFallback(else_def) => {
+                        defs.push(AbilityDefinition::new(
+                            kind,
+                            Effect::Unimplemented {
+                                name: "otherwise".to_string(),
+                                description: Some("Otherwise".to_string()),
+                            },
+                        ));
+                        defs.push(*else_def.clone());
+                        true
+                    }
+                    SpecialClause::DieExileRider(rider_def) => {
+                        if let Some(last_def) = defs.last_mut() {
+                            // CR 614.1a + CR 608.2c: Append the rider as the
+                            // tail of the existing sub_ability chain instead of
+                            // overwriting it. Multi-target damage spells
+                            // (Serpentine Spike) populate the sub_ability chain
+                            // with continuation damage events; the rider must
+                            // attach AFTER the chain so all continuation events
+                            // resolve before the replacement attaches.
+                            append_to_deepest_sub_ability(last_def, Some(rider_def.clone()));
+                        }
+                        true
+                    }
+                    SpecialClause::DigInsteadAlt(alt_def) => {
+                        if let Some(last_def) = defs.pop() {
+                            let mut new_def = *alt_def.clone();
+                            new_def.else_ability = Some(Box::new(last_def));
+                            defs.push(new_def);
+                        }
+                        true
+                    }
+                    SpecialClause::InsteadClause(instead_def) => {
+                        if let Some(mut last_def) = defs.pop() {
+                            let mut instead = *instead_def.clone();
+                            // CR 702.33d + CR 707.10: Resolve "create N of those tokens" anaphor
+                            rewrite_those_tokens_from_antecedent(
+                                &mut instead.effect,
+                                &last_def.effect,
+                            );
+                            last_def.sub_ability = Some(Box::new(instead));
+                            defs.push(last_def);
+                        }
+                        true
+                    }
+                    SpecialClause::EntersTappedAttacking => {
+                        // CR 508.4 / CR 614.1: Conditional enters-tapped-attacking modifier
+                        if let Some(prev) = defs.last() {
+                            let can_patch = matches!(
+                                &*prev.effect,
+                                Effect::CopyTokenOf { .. }
+                                    | Effect::Token { .. }
+                                    | Effect::ChangeZone { .. }
+                            );
+                            if can_patch {
+                                let mut patched = defs.pop().unwrap();
+                                match &mut *patched.effect {
                                     Effect::CopyTokenOf {
                                         enters_attacking,
                                         tapped,
                                         ..
                                     } => {
-                                        *enters_attacking = false;
-                                        *tapped = false;
+                                        *enters_attacking = true;
+                                        *tapped = true;
                                     }
                                     Effect::Token {
                                         enters_attacking,
                                         tapped,
                                         ..
                                     } => {
-                                        *enters_attacking = false;
-                                        *tapped = false;
+                                        *enters_attacking = true;
+                                        *tapped = true;
                                     }
                                     Effect::ChangeZone {
                                         enters_attacking,
                                         enter_tapped,
                                         ..
                                     } => {
-                                        *enters_attacking = false;
-                                        *enter_tapped = false;
+                                        *enters_attacking = true;
+                                        *enter_tapped = true;
                                     }
                                     _ => {}
                                 }
-                                orig
-                            };
-                            patched.condition = clause_ir.condition.clone();
-                            patched.else_ability = Some(Box::new(original));
-                            defs.push(patched);
-                        }
-                    }
-                    continue;
-                }
-                SpecialClause::KeywordInsteadOverride => {
-                    // Build the def for this clause and attach to previous as sub_ability
-                    let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
-                    let effective_cond = clause_ir
-                        .condition
-                        .as_ref()
-                        .or(clause_ir.parsed.condition.as_ref());
-                    if let Some(cond) = effective_cond {
-                        def = def.condition(cond.clone());
-                    }
-                    if let Some(prev) = defs.last_mut() {
-                        prev.sub_ability = Some(Box::new(def));
-                    }
-                    continue;
-                }
-                SpecialClause::AdditionalCostInsteadSearch => {
-                    // Build this clause's def and fold else_ability from the trailing clause.
-                    // The trailing ChangeZone was produced by the previous SearchLibrary's
-                    // intrinsic continuation (SearchDestination).
-                    let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
-                    let effective_cond = clause_ir
-                        .condition
-                        .as_ref()
-                        .or(clause_ir.parsed.condition.as_ref());
-                    if let Some(cond) = effective_cond {
-                        def = def.condition(cond.clone());
-                    }
-                    // Pop trailing search-destination ChangeZone and attach as else_ability
-                    if defs.len() >= 2 {
-                        let trailing_is_search_destination = matches!(
-                            &*defs.last().unwrap().effect,
-                            Effect::ChangeZone {
-                                origin: Some(Zone::Library),
-                                destination: Zone::Hand,
-                                ..
+                                let original = {
+                                    let mut orig = patched.clone();
+                                    match &mut *orig.effect {
+                                        Effect::CopyTokenOf {
+                                            enters_attacking,
+                                            tapped,
+                                            ..
+                                        } => {
+                                            *enters_attacking = false;
+                                            *tapped = false;
+                                        }
+                                        Effect::Token {
+                                            enters_attacking,
+                                            tapped,
+                                            ..
+                                        } => {
+                                            *enters_attacking = false;
+                                            *tapped = false;
+                                        }
+                                        Effect::ChangeZone {
+                                            enters_attacking,
+                                            enter_tapped,
+                                            ..
+                                        } => {
+                                            *enters_attacking = false;
+                                            *enter_tapped = false;
+                                        }
+                                        _ => {}
+                                    }
+                                    orig
+                                };
+                                patched.condition = clause_ir.condition.clone();
+                                patched.else_ability = Some(Box::new(original));
+                                defs.push(patched);
                             }
-                        );
-                        if trailing_is_search_destination {
-                            def.else_ability = Some(Box::new(defs.pop().unwrap()));
                         }
+                        true
                     }
-                    defs.push(def);
-                    // Apply intrinsic continuation for THIS SearchLibrary (e.g., reveal flag, ChangeZone).
-                    if let Some(ref continuation) = clause_ir.intrinsic_continuation {
-                        apply_clause_continuation(&mut defs, continuation.clone(), kind);
-                    }
-                    continue;
-                }
-                SpecialClause::DrawnThisTurnPayOrTopdeck { life_payment } => {
-                    if let Some(last_def) = defs.last_mut() {
-                        if let Effect::ChooseDrawnThisTurnPayOrTopdeck {
-                            life_payment: current,
-                            ..
-                        } = &mut *last_def.effect
-                        {
-                            *current = life_payment.clone();
+                    SpecialClause::KeywordInsteadOverride => {
+                        // Build the def for this clause and attach to previous as sub_ability
+                        let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
+                        let effective_cond = clause_ir
+                            .condition
+                            .as_ref()
+                            .or(clause_ir.parsed.condition.as_ref());
+                        if let Some(cond) = effective_cond {
+                            def = def.condition(cond.clone());
                         }
+                        if let Some(prev) = defs.last_mut() {
+                            prev.sub_ability = Some(Box::new(def));
+                        }
+                        true
                     }
-                    continue;
+                    SpecialClause::AdditionalCostInsteadSearch => {
+                        // Build this clause's def and fold else_ability from the trailing clause.
+                        // The trailing ChangeZone was produced by the previous SearchLibrary's
+                        // intrinsic continuation (SearchDestination).
+                        let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
+                        let effective_cond = clause_ir
+                            .condition
+                            .as_ref()
+                            .or(clause_ir.parsed.condition.as_ref());
+                        if let Some(cond) = effective_cond {
+                            def = def.condition(cond.clone());
+                        }
+                        // Pop trailing search-destination ChangeZone and attach as else_ability
+                        if defs.len() >= 2 {
+                            let trailing_is_search_destination = matches!(
+                                &*defs.last().unwrap().effect,
+                                Effect::ChangeZone {
+                                    origin: Some(Zone::Library),
+                                    destination: Zone::Hand,
+                                    ..
+                                }
+                            );
+                            if trailing_is_search_destination {
+                                def.else_ability = Some(Box::new(defs.pop().unwrap()));
+                            }
+                        }
+                        defs.push(def);
+                        // Apply intrinsic continuation for THIS SearchLibrary (e.g., reveal flag, ChangeZone).
+                        if let Some(ref continuation) = clause_ir.intrinsic_continuation {
+                            apply_clause_continuation(&mut defs, continuation.clone(), kind);
+                        }
+                        true
+                    }
+                    SpecialClause::DrawnThisTurnPayOrTopdeck { life_payment } => {
+                        if let Some(last_def) = defs.last_mut() {
+                            if let Effect::ChooseDrawnThisTurnPayOrTopdeck {
+                                life_payment: current,
+                                ..
+                            } = &mut *last_def.effect
+                            {
+                                *current = life_payment.clone();
+                            }
+                        }
+                        true
+                    }
+                    SpecialClause::ManaRetention(expiry) => {
+                        attach_mana_retention_to_prior_mana(&mut defs, *expiry);
+                        true
+                    }
+                    SpecialClause::SameIsTrueFor(keywords) => {
+                        attach_same_is_true_keywords(&mut defs, keywords);
+                        true
+                    }
                 }
-                SpecialClause::ManaRetention(expiry) => {
-                    attach_mana_retention_to_prior_mana(&mut defs, *expiry);
-                    continue;
-                }
-                SpecialClause::SameIsTrueFor(keywords) => {
-                    attach_same_is_true_keywords(&mut defs, keywords);
-                    continue;
-                }
+            } else {
+                false
             }
+        };
+
+        // CR 608.2c: A special/absorbed clause emits no sibling def, but it
+        // still occupies a slot in the chunk sequence and carries its own
+        // trailing `boundary` (`ClauseIr.boundary` is populated from
+        // `ClauseChunk.boundary_after`). Advance `prev_boundary` so a following
+        // normal clause stamps its `sub_link` from the boundary AFTER this
+        // clause, not the stale boundary that preceded it.
+        if handled_as_special {
+            prev_boundary = clause_ir.boundary;
+            continue;
         }
 
         // Non-absorbed, non-special followup continuation — apply it to the
@@ -11728,9 +11746,11 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         }
 
         // CR 608.2c: Advance the separating boundary for the next normal-path
-        // clause. Special-clause arms `continue` before this point — they are
-        // riders that modify prior defs, not new siblings, so they neither
-        // consume nor advance `prev_boundary`.
+        // clause. Special/absorbed clauses also advance `prev_boundary` (via the
+        // `handled_as_special` branch above) — although they emit no sibling
+        // def, they occupy a chunk slot and carry their own trailing boundary,
+        // so a following normal clause must stamp `sub_link` from the boundary
+        // AFTER the special clause, not the stale one that preceded it.
         prev_boundary = clause_ir.boundary;
     }
 
