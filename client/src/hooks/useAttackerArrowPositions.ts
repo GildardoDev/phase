@@ -137,11 +137,27 @@ export function useAttackerArrowPositions(
 
       if (stableCountRef.current < 10) {
         rafId = requestAnimationFrame(poll);
+      } else {
+        rafId = 0;
       }
     };
 
-    rafId = requestAnimationFrame(poll);
-    return () => cancelAnimationFrame(rafId);
+    const restartPolling = () => {
+      if (rafId !== 0) cancelAnimationFrame(rafId);
+      stableCountRef.current = 0;
+      prevRectsRef.current = new Map();
+      rafId = requestAnimationFrame(poll);
+    };
+
+    restartPolling();
+    window.addEventListener("resize", restartPolling);
+    window.visualViewport?.addEventListener("resize", restartPolling);
+
+    return () => {
+      if (rafId !== 0) cancelAnimationFrame(rafId);
+      window.removeEventListener("resize", restartPolling);
+      window.visualViewport?.removeEventListener("resize", restartPolling);
+    };
   }, [arrows]);
 
   return positions;

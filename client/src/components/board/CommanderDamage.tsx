@@ -1,6 +1,8 @@
 import type { PlayerId } from "../../adapter/types.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { getPlayerDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 
 interface CommanderDamageProps {
   playerId: PlayerId;
@@ -25,6 +27,7 @@ const DEFAULT_COMMANDER_DAMAGE_LETHAL = 21;
  */
 export function CommanderDamage({ playerId }: CommanderDamageProps) {
   const gameState = useGameStore((s) => s.gameState);
+  const playerNames = useMultiplayerStore((s) => s.playerNames);
   const localPlayerId = usePlayerId();
   const threshold =
     gameState?.format_config?.commander_damage_threshold ??
@@ -52,8 +55,11 @@ export function CommanderDamage({ playerId }: CommanderDamageProps) {
       data-testid={`commander-damage-${playerId}`}
     >
       {entriesForVictim.map(({ attacker, views }) => {
-        const attackerLabel =
-          Number(attacker) === localPlayerId ? "You" : `Opp ${attacker}`;
+        const attackerId = Number(attacker) as PlayerId;
+        const attackerLabel = attackerId === localPlayerId
+          ? "You"
+          : playerNames.get(attackerId) ?? getPlayerDisplayName(attackerId, localPlayerId);
+        const attackerSeatColor = getSeatColor(attackerId, gameState?.seat_order);
         const total = views.reduce((n, e) => n + e.damage, 0);
         return (
           <div
@@ -61,7 +67,15 @@ export function CommanderDamage({ playerId }: CommanderDamageProps) {
             className="flex flex-wrap items-center gap-1"
             title={`Commander damage from ${attackerLabel}: ${total}/${threshold}`}
           >
-            <span className="text-[9px] uppercase tracking-wide text-slate-400">
+            <span
+              className="flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wide"
+              style={{ color: attackerSeatColor }}
+            >
+              <span
+                aria-hidden
+                className="h-1.5 w-1.5 shrink-0 rounded-full"
+                style={{ backgroundColor: attackerSeatColor }}
+              />
               {attackerLabel}
             </span>
             {views.map((view) => {

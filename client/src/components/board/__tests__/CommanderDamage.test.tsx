@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { GameObject, GameState } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
+import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import { CommanderDamage } from "../CommanderDamage.tsx";
 
 /**
@@ -107,6 +108,7 @@ describe("CommanderDamage", () => {
 
   beforeEach(() => {
     useGameStore.setState({ gameState: undefined, legalActions: [], spellCosts: {} });
+    useMultiplayerStore.setState({ playerNames: new Map() });
   });
 
   /**
@@ -162,6 +164,29 @@ describe("CommanderDamage", () => {
     const root = screen.getByTestId("commander-damage-0");
     expect(root.textContent).toContain("Opp Commander");
     expect(root.textContent).toContain("11");
+  });
+
+  it("labels opposing commander damage by player name with that player's seat color", () => {
+    const oppCmd = commanderObject({ id: 202, owner: 1, controller: 1, name: "Opp Commander" });
+    useMultiplayerStore.setState({ playerNames: new Map([[1, "Atraxa"]]) });
+    useGameStore.setState({
+      gameState: baseGameState({
+        seat_order: [0, 1],
+        objects: { [oppCmd.id]: oppCmd },
+        command_zone: [oppCmd.id],
+        derived: {
+          commander_damage_by_attacker: {
+            "1": [{ victim: 0, commander: oppCmd.id, damage: 11 }],
+          },
+        },
+      }),
+    });
+
+    render(<CommanderDamage playerId={0} />);
+
+    const attackerLabel = screen.getByText("Atraxa");
+    expect(attackerLabel).toHaveStyle({ color: "#F43F5E" });
+    expect(screen.queryByText("Opp 1")).not.toBeInTheDocument();
   });
 
   /**
