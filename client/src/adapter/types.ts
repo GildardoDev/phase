@@ -30,6 +30,7 @@ export type GameFormat =
   | "Commander"
   | "Pioneer"
   | "Modern"
+  | "Premodern"
   | "Legacy"
   | "Vintage"
   | "Historic"

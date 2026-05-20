@@ -38,6 +38,7 @@ pub enum GameFormat {
     Commander,
     Pioneer,
     Modern,
+    Premodern,
     Legacy,
     Vintage,
     Historic,
@@ -106,6 +107,7 @@ impl GameFormat {
             GameFormat::Commander => Some(LegalityFormat::Commander),
             GameFormat::Pioneer => Some(LegalityFormat::Pioneer),
             GameFormat::Modern => Some(LegalityFormat::Modern),
+            GameFormat::Premodern => Some(LegalityFormat::Premodern),
             GameFormat::Legacy => Some(LegalityFormat::Legacy),
             GameFormat::Vintage => Some(LegalityFormat::Vintage),
             GameFormat::Historic => Some(LegalityFormat::Historic),
@@ -132,6 +134,7 @@ impl GameFormat {
             GameFormat::Standard
             | GameFormat::Pioneer
             | GameFormat::Modern
+            | GameFormat::Premodern
             | GameFormat::Legacy
             | GameFormat::Vintage
             | GameFormat::Historic
@@ -193,6 +196,7 @@ impl GameFormat {
             GameFormat::Commander => "Commander",
             GameFormat::Pioneer => "Pioneer",
             GameFormat::Modern => "Modern",
+            GameFormat::Premodern => "Premodern",
             GameFormat::Legacy => "Legacy",
             GameFormat::Vintage => "Vintage",
             GameFormat::Historic => "Historic",
@@ -238,6 +242,14 @@ impl GameFormat {
                 description: "Non-rotating from Mirrodin onward",
                 group: FormatGroup::Constructed,
                 default_config: FormatConfig::modern(),
+            },
+            FormatMetadata {
+                format: GameFormat::Premodern,
+                label: "Premodern",
+                short_label: "PRE",
+                description: "Old-frame constructed through Scourge",
+                group: FormatGroup::Constructed,
+                default_config: FormatConfig::premodern(),
             },
             FormatMetadata {
                 format: GameFormat::Legacy,
@@ -393,6 +405,14 @@ impl FormatConfig {
     pub fn modern() -> Self {
         FormatConfig {
             format: GameFormat::Modern,
+            ..Self::standard()
+        }
+    }
+
+    /// Premodern: community-maintained old-frame constructed through Scourge.
+    pub fn premodern() -> Self {
+        FormatConfig {
+            format: GameFormat::Premodern,
             ..Self::standard()
         }
     }
@@ -580,6 +600,7 @@ impl FormatConfig {
             GameFormat::Commander => Self::commander(),
             GameFormat::Pioneer => Self::pioneer(),
             GameFormat::Modern => Self::modern(),
+            GameFormat::Premodern => Self::premodern(),
             GameFormat::Legacy => Self::legacy(),
             GameFormat::Vintage => Self::vintage(),
             GameFormat::Historic => Self::historic(),
@@ -642,6 +663,21 @@ mod tests {
     }
 
     #[test]
+    fn format_config_premodern() {
+        let config = FormatConfig::premodern();
+        assert_eq!(config.format, GameFormat::Premodern);
+        assert_eq!(config.starting_life, 20);
+        assert_eq!(config.min_players, 2);
+        assert_eq!(config.max_players, 2);
+        assert_eq!(config.deck_size, 60);
+        assert!(!config.singleton);
+        assert!(!config.command_zone);
+        assert_eq!(config.commander_damage_threshold, None);
+        assert!(!config.uses_commander);
+        assert!(!config.team_based);
+    }
+
+    #[test]
     fn format_config_free_for_all() {
         let config = FormatConfig::free_for_all();
         assert_eq!(config.starting_life, 20);
@@ -669,6 +705,10 @@ mod tests {
         );
         assert_eq!(
             GameFormat::Pauper.sideboard_policy(),
+            SideboardPolicy::Limited(15)
+        );
+        assert_eq!(
+            GameFormat::Premodern.sideboard_policy(),
             SideboardPolicy::Limited(15)
         );
         assert_eq!(
@@ -719,6 +759,7 @@ mod tests {
             FormatConfig::standard(),
             FormatConfig::commander(),
             FormatConfig::pioneer(),
+            FormatConfig::premodern(),
             FormatConfig::historic(),
             FormatConfig::pauper(),
             FormatConfig::tiny_leaders(),
@@ -768,6 +809,21 @@ mod tests {
     }
 
     #[test]
+    fn premodern_uses_normal_constructed_mulligan() {
+        assert!(!GameFormat::Modern.grants_free_first_mulligan());
+        assert!(!GameFormat::Premodern.grants_free_first_mulligan());
+        assert!(!GameFormat::Legacy.grants_free_first_mulligan());
+    }
+
+    #[test]
+    fn premodern_legality_format() {
+        assert_eq!(
+            GameFormat::Premodern.legality_format(),
+            Some(LegalityFormat::Premodern)
+        );
+    }
+
+    #[test]
     fn limited_label() {
         assert_eq!(GameFormat::Limited.label(), "Limited");
     }
@@ -777,6 +833,14 @@ mod tests {
         assert_eq!(
             FormatConfig::for_format(GameFormat::Limited),
             FormatConfig::limited()
+        );
+    }
+
+    #[test]
+    fn premodern_for_format_roundtrip() {
+        assert_eq!(
+            FormatConfig::for_format(GameFormat::Premodern),
+            FormatConfig::premodern()
         );
     }
 
@@ -815,5 +879,41 @@ mod tests {
             .expect("Limited must be in registry");
         assert_eq!(entry.group, FormatGroup::Limited);
         assert_eq!(entry.short_label, "LIM");
+    }
+
+    #[test]
+    fn premodern_registry_entry_is_ordered_with_constructed_formats() {
+        let registry = GameFormat::registry();
+        let modern_index = registry
+            .iter()
+            .position(|m| m.format == GameFormat::Modern)
+            .expect("Modern must be in registry");
+        let premodern_index = registry
+            .iter()
+            .position(|m| m.format == GameFormat::Premodern)
+            .expect("Premodern must be in registry");
+        let legacy_index = registry
+            .iter()
+            .position(|m| m.format == GameFormat::Legacy)
+            .expect("Legacy must be in registry");
+
+        assert_eq!(premodern_index, modern_index + 1);
+        assert_eq!(legacy_index, premodern_index + 1);
+        assert_eq!(registry[premodern_index].short_label, "PRE");
+        assert_eq!(registry[premodern_index].group, FormatGroup::Constructed);
+    }
+
+    #[test]
+    fn registry_constructed_formats_have_legality_mapping() {
+        for meta in GameFormat::registry()
+            .into_iter()
+            .filter(|meta| meta.group == FormatGroup::Constructed)
+        {
+            assert!(
+                meta.format.legality_format().is_some(),
+                "{:?} is constructed but has no legality mapping",
+                meta.format
+            );
+        }
     }
 }

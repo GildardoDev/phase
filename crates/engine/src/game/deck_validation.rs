@@ -1129,6 +1129,7 @@ fn evaluate_selected_format_summary(
         ),
         GameFormat::Pioneer
         | GameFormat::Modern
+        | GameFormat::Premodern
         | GameFormat::Legacy
         | GameFormat::Vintage
         | GameFormat::Historic
@@ -1455,6 +1456,7 @@ fn evaluate_selected_format(
         }
         GameFormat::Pioneer
         | GameFormat::Modern
+        | GameFormat::Premodern
         | GameFormat::Legacy
         | GameFormat::Vintage
         | GameFormat::Historic
@@ -1977,6 +1979,7 @@ mod tests {
                 "legalities": {
                     "standard": "legal",
                     "commander": "legal",
+                    "premodern": "legal",
                     "pioneer": "legal",
                     "pauper": "legal",
                     "standardbrawl": "legal",
@@ -2008,6 +2011,7 @@ mod tests {
                 "legalities": {
                     "standard": "legal",
                     "commander": "legal",
+                    "premodern": "legal",
                     "pioneer": "legal",
                     "pauper": "legal",
                     "standardbrawl": "legal",
@@ -2035,6 +2039,7 @@ mod tests {
                 "legalities": {
                     "standard": "not_legal",
                     "commander": "legal",
+                    "premodern": "not_legal",
                     "pioneer": "legal",
                     "pauper": "not_legal",
                     "standardbrawl": "not_legal",
@@ -2064,6 +2069,28 @@ mod tests {
                     "commander": "legal",
                     "pioneer": "legal",
                     "pauper": "not_legal"
+                }
+            },
+            "premodern banned": {
+                "name": "Premodern Banned",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": [], "subtypes": [] },
+                "power": null,
+                "toughness": null,
+                "loyalty": null,
+                "defense": null,
+                "oracle_text": null,
+                "non_ability_text": null,
+                "flavor_name": null,
+                "keywords": [],
+                "abilities": [],
+                "triggers": [],
+                "static_abilities": [],
+                "replacements": [],
+                "color_override": null,
+                "scryfall_oracle_id": null,
+                "legalities": {
+                    "premodern": "banned"
                 }
             },
             "commander banned": {
@@ -2816,6 +2843,128 @@ mod tests {
         };
         let result = evaluate_deck_compatibility(&db, &legal_request);
         assert_eq!(result.selected_format_compatible, Some(true));
+    }
+
+    #[test]
+    fn premodern_selected_format_validates_legality() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = DeckCompatibilityRequest {
+            main_deck: legal_60_main("Legal Standard"),
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            selected_format: Some(GameFormat::Premodern),
+            selected_match_type: None,
+            summary_only: false,
+        };
+
+        let result = evaluate_deck_compatibility(&db, &request);
+
+        assert_eq!(result.selected_format_compatible, Some(true));
+    }
+
+    #[test]
+    fn premodern_selected_format_rejects_banned_cards() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = DeckCompatibilityRequest {
+            main_deck: legal_60_main("Premodern Banned"),
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            selected_format: Some(GameFormat::Premodern),
+            selected_match_type: None,
+            summary_only: false,
+        };
+
+        let result = evaluate_deck_compatibility(&db, &request);
+
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|r| r.contains("Not Premodern legal") && r.contains("banned")));
+    }
+
+    #[test]
+    fn premodern_selected_format_rejects_missing_legality() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = DeckCompatibilityRequest {
+            main_deck: legal_60_main("Pioneer Only"),
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            selected_format: Some(GameFormat::Premodern),
+            selected_match_type: None,
+            summary_only: false,
+        };
+
+        let result = evaluate_deck_compatibility(&db, &request);
+
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|r| r.contains("Pioneer Only") && r.contains("not legal in Premodern")));
+    }
+
+    #[test]
+    fn premodern_selected_format_enforces_constructed_deck_shape() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+
+        let commander_request = DeckCompatibilityRequest {
+            main_deck: legal_60_main("Legal Standard"),
+            sideboard: Vec::new(),
+            commander: vec!["Legal Standard".to_string()],
+            selected_format: Some(GameFormat::Premodern),
+            selected_match_type: None,
+            summary_only: false,
+        };
+        let result = evaluate_deck_compatibility(&db, &commander_request);
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|r| r.contains("Premodern decks do not use a commander slot")));
+
+        let oversize_sideboard = DeckCompatibilityRequest {
+            main_deck: legal_60_main("Legal Standard"),
+            sideboard: expand("Plains", 16),
+            commander: Vec::new(),
+            selected_format: Some(GameFormat::Premodern),
+            selected_match_type: None,
+            summary_only: false,
+        };
+        let result = evaluate_deck_compatibility(&db, &oversize_sideboard);
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|r| r.contains("Sideboard has 16") && r.contains("maximum 15")));
+
+        let mut main = expand("Legal Standard", 5);
+        main.extend(expand("Plains", 55));
+        let copy_limit = DeckCompatibilityRequest {
+            main_deck: main,
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            selected_format: Some(GameFormat::Premodern),
+            selected_match_type: None,
+            summary_only: false,
+        };
+        let result = evaluate_deck_compatibility(&db, &copy_limit);
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|r| r.contains("More than 4 copies")));
+    }
+
+    #[test]
+    fn validate_name_deck_for_format_rejects_non_premodern_cards() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let main_deck = legal_60_main("Pioneer Only");
+        let result =
+            validate_name_deck_for_format(&db, &main_deck, &[], &[], GameFormat::Premodern, None);
+
+        let reasons = result.expect_err("Premodern validation must reject missing legality");
+        assert!(reasons.iter().any(|r| r.contains("Not Premodern legal")));
     }
 
     #[test]

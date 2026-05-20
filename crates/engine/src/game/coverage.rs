@@ -8031,6 +8031,7 @@ mod tests {
                 "legalities": legalities_to_export_map(&HashMap::from([
                     (LegalityFormat::Standard, LegalityStatus::Legal),
                     (LegalityFormat::Modern, LegalityStatus::Legal),
+                    (LegalityFormat::Premodern, LegalityStatus::Legal),
                 ])),
             },
             "beta": {
@@ -8085,6 +8086,14 @@ mod tests {
         );
         assert_eq!(
             summary.coverage_by_format.get("modern"),
+            Some(&FormatCoverageSummary {
+                total_cards: 1,
+                supported_cards: 1,
+                coverage_pct: 100.0,
+            })
+        );
+        assert_eq!(
+            summary.coverage_by_format.get("premodern"),
             Some(&FormatCoverageSummary {
                 total_cards: 1,
                 supported_cards: 1,
