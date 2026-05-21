@@ -13,8 +13,8 @@ The goal is not just "make CI green." The goal is to leave the PR in the most id
 
 Before changing code, read these files from the repo root and apply their logic:
 
-- `/Users/matt/.claude/agents/torch/pr-review-comment-resolver.md` for review-comment fetching, categorization, prioritization, resolution, and reporting.
 - `.claude/commands/review-impl.md` for the implementation-gap review lenses.
+- `.claude/agents/pr-review-comment-resolver.md` for phase.rs-specific review-comment fetching, categorization, prioritization, resolution, verification, and reporting.
 - `.codex/agents/engine-implementer.toml` and then `.claude/agents/engine-implementer.md` when the PR needs the full engine implementation plan/review cycle.
 
 Do not paraphrase these from memory. Re-read them each time because they are the source of truth.
@@ -70,7 +70,7 @@ Resolve conflicts in the same architectural style as the surrounding code. Do no
 
 ## Review Comment Resolution
 
-Apply `/Users/matt/.claude/agents/torch/pr-review-comment-resolver.md` directly:
+Apply `.claude/agents/pr-review-comment-resolver.md` directly:
 
 1. Fetch PR reviews, issue comments, and inline review comments with `gh`.
 2. Skip resolved or non-actionable comments.
