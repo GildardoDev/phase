@@ -581,37 +581,10 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("player").parse(after_target) {
             return (TargetFilter::Player, &text[lower.len() - rest.len()..]);
         }
-        // CR 903.3 + CR 108.3: "target commander[s] <ownership-or-controller suffix>" —
-        // Sanctum of Eternity ("target commander you own"), Command Beacon
-        // counterpart, Bloodline Pretender variants. The commander is identified
-        // by the `IsCommander` flag, not a card subtype, so `parse_type_phrase`
-        // wouldn't classify it. Ownership ("you own") and control ("they
-        // control") are distinct CR 903.3 concepts here, so dispatch through
-        // `parse_ownership_or_controller_suffix` to capture both.
-        if let Ok((after_commander, _)) =
-            alt((tag::<_, _, OracleError<'_>>("commanders"), tag("commander"))).parse(after_target)
-        {
-            let mut properties = vec![FilterProp::IsCommander];
-            let mut controller: Option<ControllerRef> = None;
-            let suffix_len = parse_ownership_or_controller_suffix(
-                after_commander,
-                &mut properties,
-                &mut controller,
-                ctx,
-            );
-            if suffix_len > 0 {
-                let consumed = lower.len() - after_commander.len() + suffix_len;
-                return (
-                    TargetFilter::Typed(TypedFilter {
-                        controller,
-                        properties,
-                        ..Default::default()
-                    }),
-                    &text[consumed..],
-                );
-            }
-        }
-        // "target" + type phrase (generic)
+        // "target" + type phrase (generic). CR 903.3 + CR 108.3: "commander[s]"
+        // is recognized as a typed-phrase prefix inside `parse_type_phrase_with_ctx`
+        // — it pushes `IsCommander` and composes uniformly with the existing
+        // suffix machinery (ownership, control, counters, "with X", etc.).
         let (filter, rest) = parse_type_phrase_with_ctx(&text[target_offset..], ctx);
         let consumed_end = lower.len() - rest.len();
         return (
@@ -1087,38 +1060,13 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         }
     }
 
-    // Bare commander reference with a controller OR ownership suffix
-    // ("commander they control", "commanders target player controls",
-    // "commander you own" / "commander an opponent owns"). Non-possessive
-    // companion to the commander reference above; must not synthesize a
-    // Commander subtype. CR 903.3 + CR 108.3: ownership is distinct from
-    // control here — Sanctum of Eternity targets the commander you OWN
-    // regardless of who currently controls it.
-    if let Ok((after_commander, _)) =
-        alt((tag::<_, _, OracleError<'_>>("commanders"), tag("commander"))).parse(lower.as_str())
-    {
-        let mut properties = vec![FilterProp::IsCommander];
-        let mut controller: Option<ControllerRef> = None;
-        let suffix_len = parse_ownership_or_controller_suffix(
-            after_commander,
-            &mut properties,
-            &mut controller,
-            ctx,
-        );
-        if suffix_len > 0 {
-            let consumed = lower.len() - after_commander.len() + suffix_len;
-            return (
-                TargetFilter::Typed(TypedFilter {
-                    controller,
-                    properties,
-                    ..Default::default()
-                }),
-                &text[consumed..],
-            );
-        }
-    }
-
     // Bare type phrase fallback: try parse_type_phrase before giving up.
+    // Handles "commander[s] you own / they control" (non-possessive — the
+    // possessive form is matched above), bare "commander" (Witch's Clinic
+    // class), and combinations like "commander creature you control"
+    // (Drillworks Mole class). The commander recognition itself lives in
+    // `parse_type_phrase_with_ctx` so it composes with the full suffix grammar
+    // (ownership, control, counter, "with X", etc.) — CR 903.3 + CR 108.3.
     // Handles "other nonland permanents you own and control" after quantifier stripping.
     let (filter, rest) = parse_type_phrase_with_ctx(text, ctx);
     if target_filter_has_meaningful_content(&filter) {
@@ -1348,6 +1296,37 @@ pub fn parse_type_phrase_with_ctx<'a>(
         if starts_with_type_phrase_lead(rest) {
             properties.push(FilterProp::Historic);
             pos += lower[pos..].len() - rest.len();
+        }
+    }
+
+    // CR 903.3 + CR 108.3: "commander[s]" is a class identified by the
+    // `IsCommander` flag, not by a card type or subtype. Treat the bare word
+    // as a typed-phrase atom so the subsequent grammar (ownership/control
+    // suffix, counter suffix, "with X", combinator separators) composes
+    // uniformly. Three shapes:
+    //   - bare "commander" / "commanders" (Witch's Clinic, Sanctum of Eternity)
+    //   - "commander[s] <suffix>" (you own / they control / target player controls)
+    //   - "commander <type-word>" (Drillworks Mole: "commander creature you control")
+    // For the first two, no type word follows — the prefix sets `IsCommander`
+    // and downstream suffix machinery does the rest. For the third, advance
+    // past "commander " and let the normal color/subtype/core-type loop
+    // consume the trailing type word.
+    if let Ok((after_commander_word, _)) = alt((
+        tag::<_, _, OracleError<'_>>("commanders "),
+        tag("commander "),
+    ))
+    .parse(&lower[pos..])
+    {
+        properties.push(FilterProp::IsCommander);
+        pos += lower[pos..].len() - after_commander_word.len();
+    } else if let Ok((after_commander_word, _)) =
+        alt((tag::<_, _, OracleError<'_>>("commanders"), tag("commander"))).parse(&lower[pos..])
+    {
+        // Bare end-of-phrase "commander" with no trailing space (e.g.,
+        // "target commander." or "target commander").
+        if after_commander_word.is_empty() || after_commander_word.starts_with([',', '.']) {
+            properties.push(FilterProp::IsCommander);
+            pos += lower[pos..].len() - after_commander_word.len();
         }
     }
 
@@ -4538,27 +4517,44 @@ mod tests {
         };
         let (f, rest) =
             parse_target_with_ctx("commander they control from the battlefield", &mut ctx);
+        // CR 903.3: a commander is targeted on the battlefield. Routing through
+        // `parse_type_phrase_with_ctx` (instead of the former bare-commander
+        // branch) means the explicit "from the battlefield" zone suffix is
+        // consumed into `FilterProp::InZone` like any other typed target, so
+        // the remainder is empty.
         assert_eq!(
             f,
             TargetFilter::Typed(TypedFilter {
                 controller: Some(ControllerRef::TargetPlayer),
-                properties: vec![FilterProp::IsCommander],
+                properties: vec![
+                    FilterProp::IsCommander,
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    },
+                ],
                 ..Default::default()
             })
         );
-        assert_eq!(rest, " from the battlefield");
+        assert_eq!(rest, "");
     }
 
-    /// CR 903.3 + CR 108.3: Sanctum of Eternity — "target commander you own
-    /// from the battlefield" must lower to `Typed{IsCommander, Owned{You}}`,
-    /// distinct from the controller-suffix variant ("commander they control"
-    /// → controller=TargetPlayer, no Owned). Ownership and control are not
-    /// interchangeable here: an opponent-controlled, you-owned commander
-    /// must still match. Regression discriminator for #608: before the fix,
-    /// "target commander you own" fell through to `parse_type_phrase` and
-    /// emitted an empty Typed filter that matched any permanent.
+    /// CR 903.3 + CR 108.3: Sanctum of Eternity and the broader bare-"commander"
+    /// class (Witch's Clinic, Drillworks Mole, etc.). Commander is recognized
+    /// as a typed-phrase prefix that pushes `IsCommander` and lets the existing
+    /// suffix machinery (ownership, control, type-word, etc.) compose uniformly.
+    /// Before #608 the parser had no path to attach `IsCommander` outside
+    /// possessive contexts, so every bare/owned "target commander" fell through
+    /// to an empty Typed filter that matched any permanent.
     #[test]
-    fn target_commander_you_own_lowers_to_is_commander_plus_owned_you() {
+    fn target_commander_class_lowers_with_is_commander_property() {
+        // Sanctum of Eternity — ownership suffix, distinct from control.
+        // CR 903.3: a targetable commander resides on the battlefield. The
+        // explicit "from the battlefield" zone suffix is consumed into
+        // `FilterProp::InZone` by `parse_type_phrase_with_ctx`, leaving an
+        // empty remainder.
+        let bf = FilterProp::InZone {
+            zone: Zone::Battlefield,
+        };
         let (f, rest) = parse_target("target commander you own from the battlefield");
         assert_eq!(
             f,
@@ -4569,11 +4565,66 @@ mod tests {
                     FilterProp::Owned {
                         controller: ControllerRef::You,
                     },
+                    bf,
                 ],
                 ..Default::default()
-            })
+            }),
+            "'target commander you own' must lower to Typed{{IsCommander, Owned{{You}}, InZone{{BF}}}}"
         );
-        assert_eq!(rest, " from the battlefield");
+        assert_eq!(rest, "");
+
+        // Witch's Clinic — bare "target commander" with no zone suffix. No
+        // explicit zone is consumed, so (like every bare type phrase, e.g.
+        // "target creature") no `InZone` property is attached.
+        let (f, _) = parse_target("target commander");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter {
+                controller: None,
+                properties: vec![FilterProp::IsCommander],
+                ..Default::default()
+            }),
+            "bare 'target commander' must still carry IsCommander, not an empty filter"
+        );
+
+        // Controller suffix — "they control" with relative-player scope. No
+        // zone suffix, so no `InZone` property.
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..Default::default()
+        };
+        let (f, _) = parse_target_with_ctx("target commander they control", &mut ctx);
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::TargetPlayer),
+                properties: vec![FilterProp::IsCommander],
+                ..Default::default()
+            }),
+            "'target commander they control' must lower to Typed{{IsCommander, controller=TargetPlayer}}"
+        );
+
+        // Drillworks Mole class — "commander creature" (commander as adjective
+        // attached to a creature type) with control suffix.
+        let (f, _) = parse_target("target commander creature you control");
+        match f {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.properties.contains(&FilterProp::IsCommander),
+                    "expected IsCommander, got properties {:?}",
+                    tf.properties
+                );
+                assert!(
+                    tf.type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Creature)),
+                    "expected Creature type, got {:?}",
+                    tf.type_filters
+                );
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
     }
 
     #[test]
