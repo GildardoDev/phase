@@ -1335,7 +1335,7 @@ fn parse_object_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// CR 608.2k + CR 400.7j + CR 202.3: Previously-referenced object's mana value.
 ///
 /// Composes the prefix grammar
-/// `[the] (sacrificed|exiled|discarded|milled) (creature|card|permanent|artifact)'s (mana value|converted mana cost)`
+/// `[the] (sacrificed|exiled|discarded|milled) (creature|card|permanent|artifact|enchantment|planeswalker|land)'s (mana value|converted mana cost|power|toughness)`
 /// into a single typed combinator. Each axis is a single `alt()` over
 /// independent variants — adding a new participle, a new noun, or the British
 /// spelling of "mana value" extends one alt branch rather than adding a new
@@ -1343,7 +1343,7 @@ fn parse_object_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 ///
 /// Used by Food Chain ("1 plus the exiled creature's mana value"),
 /// Burnt Offering / Metamorphosis ("the sacrificed creature's mana value"),
-/// Heed the Mists / Mindshrieker ("the milled card's mana value"),
+/// Heed the Mists ("the milled card's mana value"),
 /// and the broader cost-paid-by-property class.
 ///
 /// CR 701.17a + CR 701.17c + CR 400.7j: "milled" card refers to the
