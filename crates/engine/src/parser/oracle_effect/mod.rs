@@ -13010,6 +13010,13 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
 }
 
 fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
+    if matches!(clause_ir.parsed.effect, Effect::MultiplyCounter { .. }) {
+        let lower = clause_ir.source_text.to_ascii_lowercase();
+        if !nom_primitives::scan_contains(&lower, "target ") {
+            return TargetChoiceTiming::Resolution;
+        }
+    }
+
     let Effect::ChangeZone {
         origin: Some(origin),
         ..
@@ -27670,6 +27677,22 @@ mod tests {
             Effect::Double {
                 target_kind: DoubleTarget::Counters { counter_type: None },
                 target: TargetFilter::Or { .. },
+            }
+        ));
+    }
+
+    #[test]
+    fn double_counters_on_each_creature_is_resolution_time_filter() {
+        let def = parse_effect_chain(
+            "Double the number of +1/+1 counters on each creature you control.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(def.target_choice_timing, TargetChoiceTiming::Resolution);
+        assert!(matches!(
+            *def.effect,
+            Effect::MultiplyCounter {
+                target: TargetFilter::Typed(_),
+                ..
             }
         ));
     }
