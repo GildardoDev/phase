@@ -16,7 +16,7 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::multispace1;
+use nom::character::complete::{multispace0, multispace1};
 use nom::combinator::{eof, map, opt, value};
 use nom::multi::many1;
 use nom::sequence::{preceded, terminated};
@@ -32,7 +32,8 @@ use super::oracle_quantity::{
     parse_for_each_object_filter_clause,
 };
 use super::oracle_target::{
-    parse_event_context_ref, parse_target, parse_target_with_ctx, parse_type_phrase,
+    parse_event_context_ref, parse_target, parse_target_with_ctx, parse_that_clause_suffix,
+    parse_type_phrase,
 };
 use super::oracle_util::{
     contains_possessive, has_unconsumed_conditional, parse_mana_symbols, parse_number,
@@ -13878,6 +13879,9 @@ fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {
 
 pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
     let lower = text.to_lowercase();
+    if target_relative_clause_owns_suffix(lower.as_str()) {
+        return (text, None);
+    }
     for (suffix, duration) in [
         (" this turn", Duration::UntilEndOfTurn),
         (" until end of turn", Duration::UntilEndOfTurn),
@@ -13937,6 +13941,25 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
     }
 
     (text, None)
+}
+
+fn target_relative_clause_owns_suffix(input: &str) -> bool {
+    let Ok((relative_clause, _)) = take_until::<_, _, OracleError<'_>>(" that ").parse(input)
+    else {
+        return false;
+    };
+    let Some((_, consumed)) = parse_that_clause_suffix(relative_clause) else {
+        return false;
+    };
+    let remaining = &relative_clause[consumed..];
+    (
+        multispace0,
+        opt(alt((tag::<_, _, OracleError<'_>>("."), tag(",")))),
+        multispace0,
+        eof,
+    )
+        .parse(remaining)
+        .is_ok()
 }
 
 /// CR 611.2b: Parse the condition text after "for as long as" into a Duration variant.
@@ -18483,6 +18506,33 @@ mod tests {
             ),
             "full pipeline: sub_ability should be GainLife(3), got: {:?}",
             sub.effect
+        );
+    }
+
+    #[test]
+    fn destroy_target_was_dealt_damage_preserves_relative_clause() {
+        let def = parse_effect_chain(
+            "Destroy target creature that was dealt damage this turn.",
+            AbilityKind::Spell,
+        );
+        let Effect::Destroy { target, .. } = &*def.effect else {
+            panic!("expected Destroy, got {:?}", def.effect);
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected typed creature target, got {target:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(
+            tf.properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::WasDealtDamageThisTurn)),
+            "expected damage-history target property, got {:?}",
+            tf.properties
+        );
+        assert!(
+            def.duration.is_none(),
+            "damage-history target clause must not become a duration: {:?}",
+            def.duration
         );
     }
 
