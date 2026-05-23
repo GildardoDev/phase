@@ -11993,7 +11993,7 @@ mod tests {
             "if it wasn't the first land you played this turn, ~ deals 1 damage to you.",
         );
         assert!(cond.is_some(), "condition must be extracted");
-        assert_eq!(cleaned, "~ deals 1 damage to you");
+        assert_eq!("~ deals 1 damage to you", cleaned);
     }
 
     #[test]
