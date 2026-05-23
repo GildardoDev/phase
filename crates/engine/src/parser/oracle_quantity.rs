@@ -1796,6 +1796,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_quantity_ref_that_creature_card_toughness() {
+        assert_eq!(
+            parse_quantity_ref("that creature card's toughness"),
+            Some(QuantityRef::Toughness {
+                scope: ObjectScope::Target
+            })
+        );
+    }
+
+    #[test]
     fn cda_quantity_uses_relative_player_scope_for_they_control() {
         let mut ctx = ParseContext {
             relative_player_scope: Some(ControllerRef::DefendingPlayer),
