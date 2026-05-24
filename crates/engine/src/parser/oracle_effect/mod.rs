@@ -5995,6 +5995,16 @@ fn try_parse_verb_and_target<'a>(
         return Some((TargetedImperativeAst::Untap { target }, rem));
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("sacrifice ")).parse(i)) {
+        if let Some((count, target, rem)) = imperative::parse_all_sacrifice(rest, ctx) {
+            return Some((
+                TargetedImperativeAst::Sacrifice {
+                    target,
+                    count,
+                    min_count: 0,
+                },
+                rem,
+            ));
+        }
         // CR 107.1c + CR 701.21a: "sacrifice one or more / any number of
         // <filter>" — delegate to the single variable-count-sacrifice
         // authority so the dynamic `UpTo(ObjectCount)` ceiling and the
