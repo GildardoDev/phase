@@ -9508,6 +9508,9 @@ pub enum ReplacementCondition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         active_player_req: Option<ControllerRef>,
     },
+    /// CR 702.178a + CR 702.179e: "Max speed — [replacement]" applies only
+    /// while the replacement source's controller has max speed.
+    HasMaxSpeed,
     /// CR 702.138c: "escapes with" — replacement applies only when the creature
     /// entered the battlefield via escape.
     CastViaEscape,

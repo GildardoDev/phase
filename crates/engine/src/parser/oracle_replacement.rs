@@ -52,7 +52,12 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
 
 /// IR production: parse a replacement line into `ReplacementIr` (pre-lowering).
 pub(crate) fn parse_replacement_line_ir(text: &str, card_name: &str) -> Option<ReplacementIr> {
-    let definition = parse_replacement_line_inner(text, card_name)?;
+    let mut definition = parse_replacement_line_inner(text, card_name)?;
+    if definition.condition.is_none() {
+        if let Some(condition) = parse_replacement_ability_word_condition(text) {
+            definition = definition.condition(condition);
+        }
+    }
     Some(ReplacementIr {
         definition,
         source_text: text.to_string(),
@@ -2317,8 +2322,25 @@ fn replacement_condition_from_static(condition: StaticCondition) -> Option<Repla
         StaticCondition::Not { condition } if *condition == StaticCondition::SourceIsTapped => {
             Some(ReplacementCondition::SourceTappedState { tapped: false })
         }
+        StaticCondition::HasMaxSpeed => Some(ReplacementCondition::HasMaxSpeed),
         _ => None,
     }
+}
+
+fn parse_replacement_ability_word_condition(text: &str) -> Option<ReplacementCondition> {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |input| {
+        value(
+            ReplacementCondition::HasMaxSpeed,
+            alt((
+                tag("max speed \u{2014} "),
+                tag("max speed -- "),
+                tag("max speed - "),
+            )),
+        )
+        .parse(input)
+    })
+    .map(|(condition, _)| condition)
 }
 
 fn parse_external_entry_suffix(stripped: &str) -> Option<(&str, bool)> {
@@ -9506,6 +9528,25 @@ mod tests {
         // Negative — wrong phase ("upkeeps" instead of "draw steps").
         assert!(!super::has_except_first_draw_in_draw_step_clause(
             "except the first one you draw in each of your upkeeps"
+        ));
+    }
+
+    #[test]
+    fn max_speed_draw_replacement_gets_replacement_condition() {
+        let def = parse_replacement_line(
+            "Max speed \u{2014} If you would draw a card, draw two cards instead.",
+            "Vnwxt, Verbose Host",
+        )
+        .expect("max speed draw replacement parses");
+
+        assert_eq!(def.event, ReplacementEvent::Draw);
+        assert_eq!(def.condition, Some(ReplacementCondition::HasMaxSpeed));
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
         ));
     }
 

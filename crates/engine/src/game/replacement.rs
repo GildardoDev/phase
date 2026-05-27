@@ -2339,6 +2339,7 @@ fn evaluate_replacement_condition(
                 crate::game::quantity::resolve_quantity(state, rhs, controller, source_id);
             comparator.evaluate(lhs_val, rhs_val)
         }
+        ReplacementCondition::HasMaxSpeed => super::speed::has_max_speed(state, controller),
         // CR 702.138c: "escapes with" — applies only when the source was cast via escape.
         // Check cast_from_zone on the entering permanent as a proxy for escape.
         ReplacementCondition::CastViaEscape => state
@@ -7032,6 +7033,32 @@ mod tests {
             ),
             "Should apply while hand size is one or fewer"
         );
+    }
+
+    #[test]
+    fn has_max_speed_condition_tracks_controller_speed() {
+        let mut state = GameState::new_two_player(42);
+        let condition = ReplacementCondition::HasMaxSpeed;
+
+        assert!(!evaluate_replacement_condition(
+            &condition,
+            PlayerId(0),
+            ObjectId(1),
+            &state,
+            None,
+            &dummy_begin_turn_event()
+        ));
+
+        state.players[0].speed = Some(4);
+
+        assert!(evaluate_replacement_condition(
+            &condition,
+            PlayerId(0),
+            ObjectId(1),
+            &state,
+            None,
+            &dummy_begin_turn_event()
+        ));
     }
 
     #[test]
