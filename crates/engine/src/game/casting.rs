@@ -13066,6 +13066,116 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cast_without_mana_cost_option_checks_commander_control() {
+        let mut state = setup_game_at_main_phase();
+
+        let spell_id = create_instant_in_hand(&mut state, PlayerId(0));
+        let spell = state.objects.get_mut(&spell_id).unwrap();
+        spell.name = "Deadly Rollick Stand-In".to_string();
+        spell.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 3,
+        };
+        let abilities = Arc::make_mut(&mut spell.abilities);
+        abilities.clear();
+        abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+        ));
+        spell.casting_options.push(
+            crate::types::ability::SpellCastingOption::free_cast().condition(
+                crate::types::ability::ParsedCondition::YouControlSubtypeCountAtLeast {
+                    subtype: "commander".to_string(),
+                    count: 1,
+                },
+            ),
+        );
+
+        let target_id = create_object(
+            &mut state,
+            CardId(22),
+            PlayerId(1),
+            "Target".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        assert!(
+            !can_cast_object_now(&state, PlayerId(0), spell_id),
+            "without mana and without a commander, the printed-cost branch is not payable"
+        );
+
+        let commander_id = create_object(
+            &mut state,
+            CardId(23),
+            PlayerId(0),
+            "Commander".to_string(),
+            Zone::Battlefield,
+        );
+        let commander = state.objects.get_mut(&commander_id).unwrap();
+        commander.card_types.core_types.push(CoreType::Artifact);
+        commander.is_commander = true;
+
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), spell_id),
+            "controlling a commander should make the free-cast option payable"
+        );
+
+        let mut events = Vec::new();
+        let waiting = handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(10), &mut events)
+            .expect("cast should reach the free-cast choice");
+        state.waiting_for = waiting;
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalCostChoice {
+                cost: AdditionalCost::Choice(
+                    AbilityCost::Mana {
+                        cost: ManaCost::NoCost
+                    },
+                    _
+                ),
+                ..
+            }
+        ));
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalCost { pay: true },
+        )
+        .expect("choosing the free-cast branch should cast the spell");
+
+        assert_eq!(state.stack.len(), 1);
+        let StackEntryKind::Spell {
+            ability: Some(ability),
+            ..
+        } = &state.stack[0].kind
+        else {
+            panic!("expected spell on stack");
+        };
+        assert_eq!(
+            ability.targets,
+            vec![crate::types::ability::TargetRef::Object(target_id)]
+        );
+    }
+
     // Snuff Out class regression: a spell with `kind: Spell { Destroy { target } }`
     // and an `AlternativeCost::PayLife` casting option must, after the user pays
     // the alternative cost, resolve normally and actually destroy the chosen target.
