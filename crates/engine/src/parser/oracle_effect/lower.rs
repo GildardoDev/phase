@@ -4372,9 +4372,19 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
             } else {
                 inner
             };
-            return Some(QuantityExpr::Offset {
+            let offset = QuantityExpr::Offset {
                 inner: Box::new(inner),
                 offset: n as i32,
+            };
+            // CR 107.1b: "where X is N minus …" can resolve negative; damage
+            // and other effect-result quantities use zero instead (The Rack).
+            return Some(if sign < 0 {
+                QuantityExpr::ClampMin {
+                    inner: Box::new(offset),
+                    minimum: 0,
+                }
+            } else {
+                offset
             });
         }
     }

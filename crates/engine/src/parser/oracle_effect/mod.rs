@@ -2930,6 +2930,9 @@ fn parse_event_context_ref_with_ctx<'a>(
         (TargetFilter::TriggeringPlayer, Some(ControllerRef::ScopedPlayer)) => {
             TargetFilter::ScopedPlayer
         }
+        (TargetFilter::TriggeringPlayer, Some(ControllerRef::SourceChosenPlayer)) => {
+            TargetFilter::SourceChosenPlayer
+        }
         (TargetFilter::TriggeringPlayer, Some(ControllerRef::ParentTargetController)) => {
             TargetFilter::ParentTargetController
         }
@@ -13077,6 +13080,72 @@ fn apply_player_scope_rewrites(def: &mut AbilityDefinition) {
 /// [`rewrite_player_scope_refs`] but is deliberately narrower — it touches only
 /// quantity refs, never `You`-scoped filters, so "you draw a card" on the same
 /// trigger still acts for the controller.
+/// CR 613.1 + CR 503.1a: Rebind possessive player quantities in a trigger
+/// whose condition names "the chosen player's" phase step (The Rack) to read
+/// the source's persisted `ChosenAttribute::Player`.
+pub(crate) fn rewrite_player_quantity_refs_to_source_chosen(def: &mut AbilityDefinition) {
+    use crate::types::ability::{CountScope, PlayerScope, QuantityRef, ZoneRef};
+
+    fn rewrite_qty(expr: &mut QuantityExpr) {
+        match expr {
+            QuantityExpr::Ref { qty } => match qty {
+                QuantityRef::LifeTotal { player }
+                | QuantityRef::HandSize { player }
+                | QuantityRef::LifeLostThisTurn { player }
+                | QuantityRef::LifeGainedThisTurn { player }
+                | QuantityRef::PartySize { player }
+                    if matches!(
+                        *player,
+                        PlayerScope::Target | PlayerScope::ScopedPlayer | PlayerScope::Controller
+                    ) =>
+                {
+                    *player = PlayerScope::SourceChosenPlayer;
+                }
+                QuantityRef::TargetZoneCardCount { zone } => match zone {
+                    ZoneRef::Hand => {
+                        *qty = QuantityRef::HandSize {
+                            player: PlayerScope::SourceChosenPlayer,
+                        }
+                    }
+                    ZoneRef::Library | ZoneRef::Graveyard => {
+                        *qty = QuantityRef::ZoneCardCount {
+                            zone: zone.clone(),
+                            card_types: Vec::new(),
+                            scope: CountScope::SourceChosenPlayer,
+                        };
+                    }
+                    ZoneRef::Exile => {}
+                },
+                _ => {}
+            },
+            QuantityExpr::DivideRounded { inner, .. }
+            | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
+            | QuantityExpr::Offset { inner, .. } => rewrite_qty(inner),
+            QuantityExpr::Sum { exprs } => {
+                for inner in exprs {
+                    rewrite_qty(inner);
+                }
+            }
+            QuantityExpr::UpTo { max } => rewrite_qty(max),
+            QuantityExpr::Power { exponent, .. } => rewrite_qty(exponent),
+            QuantityExpr::Difference { left, right } => {
+                rewrite_qty(left);
+                rewrite_qty(right);
+            }
+            QuantityExpr::Fixed { .. } => {}
+        }
+    }
+
+    each_quantity_expr_mut(&mut def.effect, &mut rewrite_qty);
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_player_quantity_refs_to_source_chosen(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_player_quantity_refs_to_source_chosen(else_branch);
+    }
+}
+
 pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefinition) {
     use crate::types::ability::{CountScope, PlayerScope, QuantityRef, ZoneRef};
 

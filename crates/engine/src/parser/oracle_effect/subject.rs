@@ -1026,6 +1026,11 @@ pub(super) fn parse_subject_application(
                 TargetFilter::ScopedPlayer
             } else if matches!(
                 ctx.relative_player_scope,
+                Some(ControllerRef::SourceChosenPlayer)
+            ) {
+                TargetFilter::SourceChosenPlayer
+            } else if matches!(
+                ctx.relative_player_scope,
                 Some(ControllerRef::ParentTargetController)
             ) {
                 TargetFilter::ParentTargetController
