@@ -369,6 +369,64 @@ fn cant_be_attached_static_splits_both_prohibitions() {
     );
 }
 
+/// CR 602.5: Viper's Kiss — "Enchanted creature gets -1/-1, and its activated
+/// abilities can't be activated." must decompose into BOTH the -1/-1 grant AND a
+/// `CantBeActivated` static. Previously the activation prohibition was dropped,
+/// so the enchanted creature's activated abilities still worked.
+#[test]
+fn cant_activate_abilities_static_splits_from_grant() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets -1/-1, and its activated abilities can't be activated.",
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::CantBeActivated { .. })),
+        "expected a CantBeActivated static, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the -1/-1 grant must be preserved"
+    );
+}
+
+/// CR 602.5 + CR 603.2a: The split `CantBeActivated` prohibits every player from
+/// activating the ENCHANTED creature's abilities. Because the static lives on the
+/// Aura and `is_blocked_by_cant_be_activated` matches `source_filter` from the
+/// Aura source (ignoring `affected`, and with no re-homing for this static mode),
+/// the companion's `source_filter` must be the host filter (`EnchantedBy`) — NOT
+/// `SelfRef`, which would resolve to the Aura itself (a silent runtime no-op).
+#[test]
+fn cant_activate_abilities_static_targets_enchanted_creature() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets -1/-1, and its activated abilities can't be activated.",
+    );
+    let prohibition = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::CantBeActivated { .. }))
+        .expect("expected a CantBeActivated static");
+    let StaticMode::CantBeActivated {
+        who, source_filter, ..
+    } = &prohibition.mode
+    else {
+        unreachable!("matched CantBeActivated above");
+    };
+    assert_eq!(
+        *who,
+        ProhibitionScope::AllPlayers,
+        "every player is prohibited"
+    );
+    assert!(
+        matches!(
+            source_filter,
+            TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::EnchantedBy)
+        ),
+        "source_filter must be the host (EnchantedBy) filter so it resolves to the \
+         enchanted creature from the Aura source, got {source_filter:?}"
+    );
+}
+
 /// CR 509.1b: Madcap Skills — "Enchanted creature gets +3/+0 and can't be
 /// blocked by more than one creature." must decompose into BOTH the P/T grant
 /// AND a `CantBeBlockedByMoreThan { max: 1 }` static affecting the enchanted
