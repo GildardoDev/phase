@@ -90,6 +90,7 @@ mod issue_2374_fblthp_library_origin;
 mod issue_2376_pyromancers_ascension;
 mod issue_2415_rottenmouth_viper_sacrifice_cost;
 mod issue_2417_satoru_intervening_if;
+mod issue_2425_fable_chapter_iii_transform;
 mod issue_2430_shifting_woodland;
 mod issue_2431_ultima_tap_land_for_c;
 mod issue_2435_traumatic_critique;
