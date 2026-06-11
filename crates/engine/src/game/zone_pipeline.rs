@@ -1898,7 +1898,11 @@ pub(crate) fn execute_zone_move(
             // effect-driven transformed entry, so only face counters are seeded.
             let intrinsic = match (enter_transformed, obj.back_face.as_ref()) {
                 (true, Some(back)) => {
-                    crate::game::printed_cards::intrinsic_face_counters(back.loyalty, back.defense)
+                    crate::game::printed_cards::intrinsic_entry_counters_for_face(
+                        back.loyalty,
+                        back.defense,
+                        &back.card_types,
+                    )
                 }
                 _ => crate::game::printed_cards::intrinsic_etb_counters(obj),
             };

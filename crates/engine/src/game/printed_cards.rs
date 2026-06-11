@@ -5,7 +5,7 @@ use crate::types::ability::{
     TriggerDefinition,
 };
 use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef};
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -343,6 +343,31 @@ pub fn intrinsic_face_counters(
         if def > 0 {
             counters.push((CounterType::Defense, def));
         }
+    }
+    counters
+}
+
+/// CR 714.3a: A Saga entering the battlefield puts a lore counter on it.
+fn intrinsic_saga_lore_counter(card_types: &CardType) -> Option<(CounterType, u32)> {
+    if card_types.subtypes.iter().any(|s| s == "Saga") {
+        Some((CounterType::Lore, 1))
+    } else {
+        None
+    }
+}
+
+/// CR 306.5b + CR 310.4b + CR 714.3a: Intrinsic counters for the face a
+/// permanent will have on entry — loyalty/defense from the entering face plus
+/// the Saga lore counter when the entering face is a Saga (CR 712.14a
+/// transformed entry reads the back face here before the physical swap).
+pub fn intrinsic_entry_counters_for_face(
+    loyalty: Option<u32>,
+    defense: Option<u32>,
+    card_types: &CardType,
+) -> Vec<(CounterType, u32)> {
+    let mut counters = intrinsic_face_counters(loyalty, defense);
+    if let Some(lore) = intrinsic_saga_lore_counter(card_types) {
+        counters.push(lore);
     }
     counters
 }
