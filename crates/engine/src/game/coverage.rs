@@ -45,6 +45,7 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::ModifyActivationLimit { .. }
             | StaticMode::AdditionalLandDrop { .. }
             | StaticMode::ModifyCost { .. }
+            | StaticMode::ImposeAdditionalCost { .. }
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::CantPayCost { .. }
             | StaticMode::CantBeCast { .. }
@@ -6827,6 +6828,12 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 CostModifyMode::Minimum => {
                     effective_lower.contains("would cost less than")
                         && effective_lower.contains("mana to cast")
+                }
+            },
+            StaticMode::ImposeAdditionalCost { action, .. } => match action {
+                crate::types::statics::AdditionalCostTaxAction::Cast => {
+                    effective_lower.contains("cost an additional")
+                        && effective_lower.contains("life to cast")
                 }
             },
             StaticMode::CantBeCountered => effective_lower.contains("can't be countered"),
