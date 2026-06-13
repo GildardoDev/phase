@@ -2304,6 +2304,7 @@ pub(super) fn apply_clause_continuation(
                                 },
                                 enters_under,
                                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                                enter_with_counters: vec![],
                                 face_down_profile,
                             },
                         ));
