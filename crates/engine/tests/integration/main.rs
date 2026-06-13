@@ -133,6 +133,7 @@ mod issue_2377_mdfc_commander_zone_revert;
 mod issue_2378_surrak_haste_grant;
 mod issue_2380_xenagos_power_boost;
 mod issue_2397_wall_of_mourning_etb;
+mod issue_2398_obuun_land_animation;
 mod issue_2414_semblance_anvil;
 mod issue_2415_rottenmouth_viper_sacrifice_cost;
 mod issue_2417_satoru_intervening_if;
