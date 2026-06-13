@@ -68,6 +68,7 @@ mod export_runtime_canaries;
 mod exquisite_blood_routing;
 mod flickerwisp_delayed_return;
 mod floodpits_drowner;
+mod flying_evasion_block_legality_2854;
 mod foretell_pipeline;
 mod frenzy_attacker_unblocked_pump;
 mod frostcliff_siege_anchor_word_modes;

@@ -891,7 +891,10 @@ pub fn validate_blockers_for_player(
             }
         }
 
-        // CR 702.9b: Flying — can only be blocked by creatures with flying or reach.
+        // CR 509.1b + CR 702.9b + CR 702.17b: Flying — a creature with flying can't
+        // be blocked except by creatures with flying and/or reach; disobeying this
+        // block restriction (CR 509.1b) makes the blocker declaration illegal. Reach
+        // (CR 702.17b) satisfies the flying restriction.
         if attacker.has_keyword(&Keyword::Flying)
             && !blocker.has_keyword(&Keyword::Flying)
             && !blocker.has_keyword(&Keyword::Reach)
@@ -2696,6 +2699,10 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
             }
         }
     }
+    // CR 509.1b + CR 702.9b + CR 702.17b: Flying — a creature with flying can't be
+    // blocked except by creatures with flying and/or reach; disobeying this block
+    // restriction (CR 509.1b) makes the blocker declaration illegal. Reach
+    // (CR 702.17b) satisfies the flying restriction.
     if attacker.has_keyword(&Keyword::Flying)
         && !blocker.has_keyword(&Keyword::Flying)
         && !blocker.has_keyword(&Keyword::Reach)
