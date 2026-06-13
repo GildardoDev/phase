@@ -5535,6 +5535,26 @@ fn controller_sacrificed_matching_this_way(
     })
 }
 
+/// CR 608.2c + CR 700.1: `RevealedHasCardType` riders (including `Not` for
+/// nonland branches) must not evaluate when no card was revealed or moved this
+/// way — negating a failed land match must not become true (issue #2871).
+fn subject_dependent_type_condition_has_no_subject(
+    condition: &AbilityCondition,
+    state: &GameState,
+) -> bool {
+    match condition {
+        AbilityCondition::RevealedHasCardType { .. } => state
+            .last_revealed_ids
+            .first()
+            .or_else(|| state.last_zone_changed_ids.first())
+            .is_none(),
+        AbilityCondition::Not { condition } => {
+            subject_dependent_type_condition_has_no_subject(condition, state)
+        }
+        _ => false,
+    }
+}
+
 /// CR 608.2c: Evaluate a condition against the current game state and ability context.
 /// Returns whether the condition is met. Handles all `AbilityCondition` variants as
 /// pure boolean evaluators — callers are responsible for any terminal control flow
@@ -5992,7 +6012,12 @@ pub(crate) fn evaluate_condition(
             .iter()
             .any(|c| evaluate_condition(c, state, ability)),
         // CR 608.2c: Logical negation — true when the inner condition is false.
-        AbilityCondition::Not { condition } => !evaluate_condition(condition, state, ability),
+        AbilityCondition::Not { condition } => {
+            if subject_dependent_type_condition_has_no_subject(condition, state) {
+                return false;
+            }
+            !evaluate_condition(condition, state, ability)
+        }
         // CR 730.2a: True when it's neither day nor night (no designation set yet).
         AbilityCondition::DayNightIsNeither => state.day_night.is_none(),
         // CR 731.1: True when the game has the requested day/night designation.
@@ -14426,6 +14451,12 @@ mod tests {
             evaluate_condition(&nonland_cond, &state, &ability),
             "nonland-card branch must fire when parent ChangeZone moved a nonland",
         );
+
+        // Issue #2871: with no reveal and no parent zone change, the nonland
+        // `Not { RevealedHasCardType { Land } }` rider must NOT fire.
+        state.last_zone_changed_ids.clear();
+        state.last_revealed_ids.clear();
+        assert!(!evaluate_condition(&nonland_cond, &state, &ability));
 
         // CR 700.1 + CR 701.20: A real reveal still wins over the zone-change
         // fallback so existing reveal-driven cards (Goblin Guide, dig effects)
