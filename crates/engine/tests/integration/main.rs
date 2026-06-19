@@ -84,6 +84,7 @@ mod frenzy_attacker_unblocked_pump;
 mod frostcliff_siege_anchor_word_modes;
 mod fury_sliver_double_strike_grant;
 mod fuse_runtime;
+mod gaeas_anthem_team_pump;
 mod gatta_and_luzzu_regression;
 mod gemstone_caverns_begin_game;
 mod giada_angel_counters;
