@@ -2741,7 +2741,12 @@ pub(super) fn apply_clause_continuation(
                 ..
             } = &mut *previous.effect
             {
-                *destination = Some(Zone::Library);
+                // Preserve an explicit kept destination (Hand, Battlefield, etc.)
+                // from an earlier "put one into your hand" clause; only default
+                // destination to Library for reveal-only digs.
+                if destination.is_none() {
+                    *destination = Some(Zone::Library);
+                }
                 *rest_destination = Some(Zone::Library);
             }
             let put_def = AbilityDefinition::new(

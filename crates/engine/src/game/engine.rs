@@ -17989,6 +17989,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            library_position: None,
             is_cost_payment: false,
         };
         state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
@@ -18059,6 +18060,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            library_position: None,
             is_cost_payment: false,
         };
 
@@ -18105,6 +18107,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            library_position: None,
             is_cost_payment: false,
         };
 

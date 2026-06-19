@@ -7980,6 +7980,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            library_position: None,
             is_cost_payment: false,
         };
 
@@ -12205,6 +12206,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_profile: None,
             count_param: 0,
+            library_position: None,
             is_cost_payment: false,
         };
         state.pending_continuation =
@@ -12242,6 +12244,7 @@ mod tests {
                 track_exiled_by_source: false,
                 face_down_profile: None,
                 count_param: 0,
+                library_position: None,
                 is_cost_payment: false,
             },
             GameAction::SelectCards {
@@ -18329,6 +18332,144 @@ mod tests {
             condition_contains_city_blessing(&condition),
             "city's-blessing gated continuations wrapped in ConditionInstead must run the \
              mid-chain blessing check before the condition is evaluated"
+        );
+    }
+
+    /// CR 601.2a + CR 608.2c (issue #1162): Expressive Iteration looks at
+    /// three cards, keeps one in hand, then must still reach the bottom/exile
+    /// tail on the other looked-at cards.
+    #[test]
+    fn expressive_iteration_dig_chain_reaches_library_bottom_and_exile() {
+        use crate::game::engine;
+        use crate::types::ability::CastingPermission;
+        use crate::types::ability::Duration;
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Expressive Iteration".to_string(),
+            Zone::Stack,
+        );
+        let card_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card A".to_string(),
+            Zone::Library,
+        );
+        let card_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Card B".to_string(),
+            Zone::Library,
+        );
+        let card_c = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Card C".to_string(),
+            Zone::Library,
+        );
+        state.players[0].library = vec![card_a, card_b, card_c].into();
+
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "Look at the top three cards of your library. Put one of them into your hand, put one of them on the bottom of your library, and exile one of them. You may play the exiled card this turn.",
+            AbilityKind::Spell,
+        );
+        let ability =
+            crate::game::ability_utils::build_resolved_from_def(&def, source, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::DigChoice { .. }),
+            "expected initial dig choice, got {:?}",
+            state.waiting_for
+        );
+
+        engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![card_a],
+            },
+        )
+        .unwrap();
+
+        let tracked: Vec<_> = state
+            .tracked_object_sets
+            .get(
+                &state
+                    .chain_tracked_set_id
+                    .expect("dig tail must publish a tracked set"),
+            )
+            .expect("tracked set must exist")
+            .clone();
+        assert_eq!(
+            tracked,
+            vec![card_b, card_c],
+            "dig must publish only the unkept looked-at cards"
+        );
+
+        let WaitingFor::EffectZoneChoice {
+            cards: eligible,
+            effect_kind,
+            ..
+        } = state.waiting_for.clone()
+        else {
+            panic!(
+                "expected bottom-of-library choice after keeping to hand, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(
+            effect_kind,
+            crate::types::ability::EffectKind::PutAtLibraryPosition
+        );
+        assert_eq!(
+            eligible,
+            vec![card_b, card_c],
+            "bottom choice must be among unkept library cards"
+        );
+
+        engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![card_b],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(state.objects[&card_a].zone, Zone::Hand);
+        assert_eq!(state.objects[&card_b].zone, Zone::Library);
+        assert_eq!(state.objects[&card_c].zone, Zone::Exile);
+        assert!(
+            state.players[0].library.back() == Some(&card_b),
+            "card B must be on the bottom of the library"
+        );
+        assert!(
+            !state.objects[&card_b]
+                .casting_permissions
+                .iter()
+                .any(|p| matches!(p, CastingPermission::PlayFromExile { .. })),
+            "bottomed card must not receive play permission"
+        );
+        assert!(
+            state.objects[&card_c]
+                .casting_permissions
+                .iter()
+                .any(|p| matches!(
+                    p,
+                    CastingPermission::PlayFromExile {
+                        duration: Duration::UntilEndOfTurn,
+                        granted_to: PlayerId(0),
+                        ..
+                    }
+                )),
+            "exiled card must receive play-this-turn permission"
         );
     }
 }

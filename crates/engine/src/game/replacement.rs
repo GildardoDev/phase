@@ -737,6 +737,7 @@ fn pay_replacement_may_cost(
                         && matches!(
                             state.waiting_for,
                             WaitingFor::EffectZoneChoice {
+                                library_position: None,
                                 is_cost_payment: true,
                                 ..
                             }
