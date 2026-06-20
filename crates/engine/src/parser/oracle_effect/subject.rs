@@ -49,6 +49,16 @@ pub(super) fn try_parse_subject_predicate_ast(
         return None;
     }
 
+    // CR 120.1 + CR 115.1d: defer the "up to two target creatures you control each
+    // deal damage equal to their power to target creature" shape to the imperative
+    // path, which preserves both the targeted source set and the recipient as
+    // independent targets. Splitting it into subject + imperative-fallback here
+    // would drop the per-source damage semantics. (The team-scope variant fails
+    // closed to `Unimplemented` earlier, in `parse_effect_clause_inner`.)
+    if try_parse_each_deals_damage_equal_to_power(text).is_some() {
+        return None;
+    }
+
     // CR 702.3b: "can attack [this turn] as though it didn't have defender" —
     // must intercept before continuous clause parsing which would incorrectly
     // extract "defender" as an AddKeyword from "didn't have defender".
@@ -3614,6 +3624,105 @@ pub(super) fn try_parse_targeted_controller_gain_life(text: &str) -> Option<Pars
         amount,
         player: player_filter,
     }))
+}
+
+/// CR 120.1 + CR 120.3 + CR 115.1d: "Up to two target creatures you control each
+/// deal damage equal to their power to target creature [restriction]." (Band
+/// Together, Allies at Last, Combo Attack, Friendly Rivalry, Graceful Takedown.)
+///
+/// The subject ("[up to two|two|one or two] target creatures you control" /
+/// "two target creatures your team controls") is a TARGETED source set — its
+/// count bound becomes the ability's `multi_target` spec and its per-object
+/// legality the `sources` filter. The "to <target creature>" tail is the single
+/// recipient. Produces `Effect::EachDealsDamageEqualToPower { sources, recipient }`
+/// with the count spec carried on the returned clause's `multi_target`.
+///
+/// Subject preservation matters: the sources are not the ability source (the
+/// spell), and the recipient is a second, independent target — so this must be
+/// recognized before generic subject stripping flattens the sentence.
+pub(super) fn try_parse_each_deals_damage_equal_to_power(text: &str) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    // CR 115.1d: the source-count quantifier. "two" → exactly 2; "up to two" →
+    // 0..=2; "one or two" → 1..=2. Each axis is one `tag()` alternative.
+    let (after_count, multi_target) = parse_each_deals_source_count(lower.as_str())?;
+
+    // CR 115.1: the source set, as a TARGETED creature filter. "your team
+    // controls" (Two-Headed Giant team scope, CR 810) is intentionally NOT
+    // collapsed to "you control": a team is not the caster's controller, so a
+    // card that uses it (Combo Attack) must fail closed rather than mis-target a
+    // single player's creatures. `parse_target` does not consume the non-standard
+    // "your team controls" controller phrase, so it stays in `after_sources` and
+    // the verb-phrase `tag` below rejects the line (-> Unimplemented).
+    let (sources, after_sources) = parse_target(after_count);
+    if !target_filter_is_targeted_creature(&sources) {
+        return None;
+    }
+
+    // CR 120.1: the verb phrase. Each chosen source deals damage equal to its own
+    // power. `parse()` returns `(remaining, output)` — bind the remaining text.
+    let after_sources_trimmed = after_sources.trim_start();
+    let after_verb = match tag::<_, _, OracleError<'_>>("each deal damage equal to their power to ")
+        .parse(after_sources_trimmed)
+    {
+        Ok((rest, _)) => rest,
+        // CR 810: the team-up shape carrying an unmodelable "your team controls"
+        // source scope (Combo Attack). `parse_target` leaves "your team controls
+        // …" in the remainder, so the verb tag above misses. Fail CLOSED to a
+        // DETERMINISTIC `Unimplemented` rather than returning `None`: `None` would
+        // let a generic target-only fallback non-deterministically accept the
+        // leading "two target creatures …" as a bare `TargetOnly` clause (the
+        // fallback order is HashMap-seed dependent).
+        Err(_)
+            if tag::<_, _, OracleError<'_>>(
+                "your team controls each deal damage equal to their power to ",
+            )
+            .parse(after_sources_trimmed)
+            .is_ok() =>
+        {
+            return Some(super::parsed_clause(Effect::unimplemented("deal", text)));
+        }
+        Err(_) => return None,
+    };
+
+    // CR 115.1: the single recipient creature ("target creature", "target
+    // creature an opponent controls", "another target creature", "target
+    // creature you don't control").
+    let (recipient, _rest) = parse_target(after_verb);
+    if !target_filter_is_targeted_creature(&recipient) {
+        return None;
+    }
+
+    Some(ParsedEffectClause {
+        multi_target: Some(multi_target),
+        ..super::parsed_clause(Effect::EachDealsDamageEqualToPower { sources, recipient })
+    })
+}
+
+/// CR 115.1d: Parse the leading source-count quantifier of the team-up damage
+/// line and return the remaining text plus the `MultiTargetSpec` it encodes.
+/// "up to two" → 0..=2, "one or two" → 1..=2, "two" → exactly 2.
+fn parse_each_deals_source_count(lower: &str) -> Option<(&str, MultiTargetSpec)> {
+    alt((
+        map(tag::<_, _, OracleError<'_>>("up to two "), |_| {
+            MultiTargetSpec::fixed(0, 2)
+        }),
+        map(tag("one or two "), |_| MultiTargetSpec::fixed(1, 2)),
+        map(tag("two "), |_| MultiTargetSpec::fixed(2, 2)),
+    ))
+    .parse(lower)
+    .ok()
+}
+
+/// CR 115.1: True when `filter` is a "target creature" object filter (the
+/// `target` keyword present, restricted to creatures). Guards both the source
+/// set and the recipient of the team-up damage line so non-creature or
+/// non-targeted phrases fall through to the generic parser.
+fn target_filter_is_targeted_creature(filter: &TargetFilter) -> bool {
+    matches!(filter, TargetFilter::Typed(tf)
+    if tf.type_filters.iter().any(|t| matches!(
+        t,
+        crate::types::ability::TypeFilter::Creature
+    )))
 }
 
 /// Parse `~ <predicate-verb>` at the start of input, succeeding only when the
