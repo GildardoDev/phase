@@ -321,6 +321,7 @@ mod issue_3878_go_shintai_combat_damage;
 mod issue_3881_feed_swarm_darksteel_mutation;
 mod issue_3883_kari_zev_ragavan;
 mod issue_4000_dominating_licid;
+mod issue_4050_adamaro_extremum_hand_size;
 mod issue_536_six_grants_retrace;
 mod issue_541_endurance_graveyard_to_bottom;
 mod issue_544_krark_clan_ironworks_auto_pass;
