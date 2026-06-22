@@ -1052,8 +1052,36 @@ pub(crate) fn try_parse_temporal_delayed_trigger_ability(
     let tp = TextPair::new(text, &lower);
     let clause = try_parse_whenever_this_turn(tp)
         .or_else(|| try_parse_when_next_event(tp))
-        .or_else(|| try_parse_copy_next_spell_when_cast(tp))?;
+        .or_else(|| try_parse_copy_next_spell_when_cast(tp))
+        .or_else(|| try_parse_at_next_phase_delayed_trigger(text, kind))?;
     Some(ability_definition_from_clause(kind, clause))
+}
+
+/// CR 603.7a: Pact-cycle instants ("At the beginning of your next upkeep, pay
+/// {2}{G}{G}. If you don't, you lose the game.") install a one-shot delayed
+/// trigger when the spell resolves — not a printed battlefield Phase trigger.
+fn try_parse_at_next_phase_delayed_trigger(
+    text: &str,
+    kind: AbilityKind,
+) -> Option<ParsedEffectClause> {
+    let (effect_text, condition) = strip_temporal_prefix(text);
+    let condition = condition?;
+    let mut ctx = ParseContext::default();
+    let inner = parse_effect_chain_with_context(effect_text, kind, &mut ctx);
+    Some(ParsedEffectClause {
+        effect: Effect::CreateDelayedTrigger {
+            condition,
+            effect: Box::new(inner),
+            uses_tracked_set: false,
+        },
+        duration: None,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
 }
 
 /// CR 614.1a + CR 514.2: Detect "If [target_phrase] would die this turn, exile

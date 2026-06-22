@@ -2738,11 +2738,12 @@ pub(crate) fn parse_oracle_ir(
         }
 
         // CR 603.7a-b: Instant/sorcery text like "Whenever [event] this turn, ..."
-        // creates a delayed triggered ability during resolution. It is not a
-        // permanent's printed triggered ability, so spell cards must get one
-        // chance to route trigger-shaped temporal text through the effect parser
-        // before generic trigger dispatch.
-        if is_spell && has_trigger_prefix(&lower) && scan_contains(&lower, "this turn") {
+        // or "At the beginning of your next upkeep, ..." creates a delayed
+        // triggered ability during resolution. It is not a permanent's printed
+        // triggered ability, so spell cards must get one chance to route
+        // trigger-shaped temporal text through the effect parser before generic
+        // trigger dispatch.
+        if is_spell && has_trigger_prefix(&lower) {
             if let Some(def) = try_parse_temporal_delayed_trigger_ability(&line, AbilityKind::Spell)
             {
                 result.abilities.push(def);
