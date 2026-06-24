@@ -1398,33 +1398,89 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
         // CR 608.2b + CR 701.14a: Dual-fighter fights validate each chosen
         // fighter against its own slot filter so one illegal fighter does not
         // collapse into the single-target "~ fights" fallback shape.
-        let mut filters: Vec<&TargetFilter> = Vec::new();
         if fight_subject_needs_target_slot(subject) {
-            filters.push(subject);
-        }
-        filters.push(target);
-        let mut kept = Vec::new();
-        let mut target_iter = validated.targets.iter();
-        for filter in filters {
-            if matches!(filter, TargetFilter::SelfRef | TargetFilter::ParentTarget) {
-                continue;
+            let filters = vec![subject, target];
+            let mut kept = Vec::new();
+            let mut target_iter = validated.targets.iter();
+            for filter in filters {
+                if matches!(filter, TargetFilter::SelfRef | TargetFilter::ParentTarget) {
+                    continue;
+                }
+                let Some(target_ref) = target_iter.next() else {
+                    continue;
+                };
+                if let Some(legal) = targeting::validate_targets_for_ability(
+                    state,
+                    std::slice::from_ref(target_ref),
+                    filter,
+                    &validated,
+                )
+                .into_iter()
+                .next()
+                {
+                    kept.push(legal);
+                }
             }
-            let Some(target_ref) = target_iter.next() else {
-                continue;
-            };
-            if let Some(legal) = targeting::validate_targets_for_ability(
-                state,
-                std::slice::from_ref(target_ref),
-                filter,
-                &validated,
-            )
-            .into_iter()
-            .next()
-            {
-                kept.push(legal);
+            kept
+        } else {
+            // CR 701.14a + CR 608.2b: "~ fights" / anaphoric "it fights" / chained
+            // "that creature … and fights" — the ally fighter is implicit. Propagated
+            // targets are ordered [ally, opponent], but only the opponent must satisfy
+            // this effect's `target` filter; pairing targets[0] against that filter
+            // wrongly drops the ally (Ent's Fury, issue #1135). Nested chain links keep
+            // chosen targets on the resolving spell, not on the fight sub-clause itself.
+            let candidate_targets = state
+                .resolving_stack_entry
+                .as_ref()
+                .and_then(|entry| entry.ability())
+                .map(flatten_targets_in_chain)
+                .filter(|targets| !targets.is_empty())
+                .unwrap_or_else(|| validated.targets.clone());
+
+            fn fight_creature_on_battlefield(
+                state: &GameState,
+                id: crate::types::identifiers::ObjectId,
+            ) -> bool {
+                state.objects.get(&id).is_some_and(|obj| {
+                    obj.zone == crate::types::zones::Zone::Battlefield
+                        && obj.is_phased_in()
+                        && obj
+                            .card_types
+                            .core_types
+                            .contains(&crate::types::card_type::CoreType::Creature)
+                })
             }
+
+            let explicit: Vec<TargetRef> = candidate_targets
+                .iter()
+                .filter(|t| {
+                    targeting::validate_targets_for_ability(
+                        state,
+                        std::slice::from_ref(t),
+                        target,
+                        &validated,
+                    )
+                    .into_iter()
+                    .next()
+                    .is_some()
+                })
+                .cloned()
+                .collect();
+
+            let mut kept = Vec::new();
+            if explicit.len() == 1 {
+                if let Some(ally) = candidate_targets.iter().find(|t| {
+                    let TargetRef::Object(id) = t else {
+                        return false;
+                    };
+                    !explicit.contains(t) && fight_creature_on_battlefield(state, *id)
+                }) {
+                    kept.push(ally.clone());
+                }
+            }
+            kept.extend(explicit);
+            kept
         }
-        kept
     } else if let Some(src_leaf) = prevent_damage_source_slot_filter(&validated.effect).cloned() {
         // CR 608.2b + CR 609.7a: A source-scoped `PreventDamage` carries its
         // chosen source spell in `targets[0]`. `extract_target_filter_from_effect`
@@ -10752,6 +10808,115 @@ mod tests {
             sub.sub_link,
             SubAbilityLink::SequentialSibling,
             "appended mode root must be tagged SequentialSibling"
+        );
+    }
+
+    #[test]
+    fn ents_fury_spell_collects_ally_and_opponent_target_slots() {
+        use crate::game::zones::create_object;
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::card_type::CoreType;
+        use crate::types::zones::Zone;
+
+        let def = parse_effect_chain(
+            "Put a +1/+1 counter on target creature you control if its power is 4 or greater. Then that creature gets +1/+1 until end of turn and fights target creature you don't control.",
+            AbilityKind::Spell,
+        );
+        let mut state = GameState::new_two_player(42);
+        let bear = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let wolf = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Wolf".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [bear, wolf] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        let ability = build_resolved_from_def(&def, ObjectId(1), PlayerId(0));
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(
+            slots.len(),
+            2,
+            "Ent's Fury must surface ally + opponent target slots, got {}",
+            slots.len()
+        );
+    }
+
+    #[test]
+    fn ents_fury_oracle_text_path_collects_two_target_slots() {
+        use crate::database::synthesis::parse_oracle_with_cleave_brackets;
+        use crate::game::zones::create_object;
+        use crate::types::card_type::CoreType;
+        use crate::types::zones::Zone;
+
+        let oracle = "Put a +1/+1 counter on target creature you control if its power is 4 or greater. Then that creature gets +1/+1 until end of turn and fights target creature you don't control.";
+        let (parsed, _) = parse_oracle_with_cleave_brackets(
+            oracle,
+            "Ent's Fury",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        assert!(
+            !parsed.abilities.is_empty(),
+            "oracle parse must produce a spell ability"
+        );
+        let mut combined = parsed.abilities[0].clone();
+        for spell_ability in parsed.abilities.iter().skip(1) {
+            if spell_ability.kind == AbilityKind::Spell {
+                let mut node = &mut combined;
+                while node.sub_ability.is_some() {
+                    node = node.sub_ability.as_mut().unwrap();
+                }
+                node.sub_ability = Some(Box::new(spell_ability.clone()));
+            }
+        }
+        let mut state = GameState::new_two_player(42);
+        let bear = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let wolf = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Wolf".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [bear, wolf] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        let ability = build_resolved_from_def(&combined, ObjectId(1), PlayerId(0));
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(
+            slots.len(),
+            2,
+            "production oracle path must surface ally + opponent slots (abilities={}), got {}",
+            parsed.abilities.len(),
+            slots.len()
         );
     }
 }
