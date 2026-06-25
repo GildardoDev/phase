@@ -374,6 +374,7 @@ mod issue_688_mind_into_matter;
 mod issue_689_resonating_lute_hand_size;
 mod issue_691_sheoldred_saga_lore;
 mod issue_709_regression;
+mod issue_787_once_upon_a_time;
 mod issue_828_full_throttle;
 mod issue_841_selvala_explorer_returned;
 mod issue_847_braids_cabal_minion;
