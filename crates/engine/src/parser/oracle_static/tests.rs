@@ -20341,3 +20341,17 @@ fn static_creatures_defending_player_controls_not_via_suffix_parser() {
         "parse_creature_subject_filter must not accept 'defending player controls' as a controller suffix"
     );
 }
+#[test]
+fn static_creatures_enchanted_player_controls_attack_each_combat_if_able() {
+    // Curse of the Nightly Hunt: "Creatures enchanted player controls attack each combat if able."
+    // CR 508.1d + CR 303.4b: MustAttack scoped to the enchanted player.
+    let def = parse_static_line("Creatures enchanted player controls attack each combat if able.")
+        .unwrap();
+    assert_eq!(def.mode, StaticMode::MustAttack);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::EnchantedPlayer)
+        ))
+    );
+}
