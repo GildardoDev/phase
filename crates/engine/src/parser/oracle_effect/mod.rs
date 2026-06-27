@@ -37452,6 +37452,58 @@ mod tests {
         );
     }
 
+    /// CR 105.2 + CR 608.2c: Disjunctive color condition — "if that creature
+    /// is white or blue" (Lightning Dart, Inquisitor's Snare). The parser must
+    /// emit `TargetFilter::Or { [HasColor(White), HasColor(Blue)] }` wrapped in
+    /// `ConditionInstead` so the override fires for either matching color.
+    #[test]
+    fn instead_condition_recognizes_disjunctive_color() {
+        let ability = parse_effect_chain(
+            "~ deals 1 damage to target creature. If that creature is white or blue, ~ deals 4 damage to it instead.",
+            AbilityKind::Spell,
+        );
+        let sub = ability
+            .sub_ability
+            .as_ref()
+            .expect("expected instead sub_ability");
+        let cond = sub
+            .condition
+            .as_ref()
+            .expect("instead sub_ability must carry a condition");
+        match cond {
+            AbilityCondition::ConditionInstead { inner } => match inner.as_ref() {
+                AbilityCondition::TargetMatchesFilter {
+                    filter: TargetFilter::Or { filters },
+                    use_lki: false,
+                } => {
+                    assert_eq!(filters.len(), 2, "expected 2 color filters in Or");
+                    assert!(
+                        matches!(
+                            &filters[0],
+                            TargetFilter::Typed(t) if t.properties.iter().any(|p| matches!(
+                                p, FilterProp::HasColor { color: ManaColor::White }
+                            ))
+                        ),
+                        "first filter must be HasColor(White), got {:?}",
+                        filters[0]
+                    );
+                    assert!(
+                        matches!(
+                            &filters[1],
+                            TargetFilter::Typed(t) if t.properties.iter().any(|p| matches!(
+                                p, FilterProp::HasColor { color: ManaColor::Blue }
+                            ))
+                        ),
+                        "second filter must be HasColor(Blue), got {:?}",
+                        filters[1]
+                    );
+                }
+                other => panic!("expected TargetMatchesFilter with Or, got {:?}", other),
+            },
+            other => panic!("expected ConditionInstead, got {:?}", other),
+        }
+    }
+
     /// CR 117.1 + CR 614.1a: Establishing Shot class — "this is the first
     /// spell you've cast this game" gates an instead-override. The condition
     /// resolves against `state.spells_cast_this_game` for the controller; an
