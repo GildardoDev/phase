@@ -19698,6 +19698,35 @@ pub(crate) fn parse_effect_chain_ir(
             continue;
         }
 
+        // CR 702.143d: "Its foretell cost is [cost]." — an effect-defined
+        // foretell cost sentence (e.g. Ethereal Valkyrie: "its mana cost
+        // reduced by {2}"). Effect-defined foretell costs are not yet
+        // representable in `CastingPermission::Foretold`; suppress any
+        // preceding `BecomesForetold` continuation to avoid emitting a wrong
+        // {0} permission. The sentence then falls through to Unimplemented,
+        // honestly documenting unsupported coverage until effect-defined
+        // foretell cost expressions are implemented.
+        {
+            let foretell_lower = normalized_text.to_lowercase();
+            if sequence::is_foretell_cost_override_sentence(&foretell_lower) {
+                if let Some(absorbed) = clauses.iter_mut().rev().find(|c| {
+                    c.absorbed_by_followup
+                        && matches!(
+                            c.followup_continuation,
+                            Some(ContinuationAst::BecomesForetold)
+                        )
+                }) {
+                    // Suppress the grant: clear the BecomesForetold
+                    // continuation so lowering does not emit the wrong {0}
+                    // permission (strict failure until cost is representable).
+                    absorbed.followup_continuation = None;
+                }
+                // Fall through: parses as Unimplemented, accurately
+                // documenting that effect-defined foretell costs are
+                // unsupported.
+            }
+        }
+
         if let Some(expiry) = try_parse_mana_retention_rider(normalized_text) {
             if !clauses.is_empty() {
                 clauses.push(ClauseIr {
@@ -40863,6 +40892,109 @@ mod tests {
             TargetFilter::TrackedSet {
                 id: TrackedSetId(0)
             }
+        );
+    }
+
+    /// CR 702.143d: The Foretold Soldier — "exile it face down. It becomes
+    /// foretold." The second sentence must chain a `GrantCastingPermission`
+    /// with `CastingPermission::Foretold` onto the exile (mirroring the plotted
+    /// path), not fall through to an unimplemented "become" gap.
+    #[test]
+    fn parse_exile_it_face_down_then_it_becomes_foretold() {
+        let def = parse_effect_chain(
+            "Exile it face down. It becomes foretold.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            def.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ));
+
+        let grant = def
+            .sub_ability
+            .as_deref()
+            .expect("foretold grant sub-ability");
+        let Effect::GrantCastingPermission {
+            permission,
+            target,
+            grantee,
+        } = grant.effect.as_ref()
+        else {
+            panic!("expected GrantCastingPermission, got {:?}", grant.effect);
+        };
+        // `cost` is a parse-time placeholder filled at resolution from the
+        // card's own Foretell keyword; `turn_foretold` is stamped at resolution.
+        assert!(matches!(
+            permission,
+            CastingPermission::Foretold {
+                turn_foretold: 0,
+                ..
+            }
+        ));
+        assert_eq!(*target, TargetFilter::ParentTarget);
+        assert_eq!(*grantee, PermissionGrantee::ObjectOwner);
+
+        // No `Unimplemented` may remain anywhere in the resolved chain.
+        let mut cursor = Some(&def);
+        while let Some(node) = cursor {
+            assert!(
+                !matches!(node.effect.as_ref(), Effect::Unimplemented { .. }),
+                "foretold chain must not contain Unimplemented: {:?}",
+                node.effect
+            );
+            cursor = node.sub_ability.as_deref();
+        }
+    }
+
+    /// CR 702.143d: Ethereal Valkyrie — "exile a card from your hand face down.
+    /// It becomes foretold. Its foretell cost is its mana cost reduced by {2}."
+    /// The effect-defined cost ("its foretell cost is...") is not yet
+    /// representable in `CastingPermission::Foretold`. The BecomesForetold
+    /// grant must be suppressed (strict failure) so the exiled card is never
+    /// castable from exile for the wrong {0} placeholder cost. The foretell
+    /// cost sentence should produce Unimplemented, accurately reflecting
+    /// unsupported coverage until effect-defined foretell cost expressions are
+    /// implemented.
+    #[test]
+    fn parse_becomes_foretold_with_cost_override_suppresses_grant() {
+        let def = parse_effect_chain(
+            "exile a card from your hand face down. It becomes foretold. Its foretell cost is its mana cost reduced by {2}.",
+            AbilityKind::Spell,
+        );
+        // Walk the entire def chain: GrantCastingPermission::Foretold must not appear.
+        fn has_foretold_grant(def: &AbilityDefinition) -> bool {
+            if matches!(
+                def.effect.as_ref(),
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::Foretold { .. },
+                    ..
+                }
+            ) {
+                return true;
+            }
+            def.sub_ability.as_deref().is_some_and(has_foretold_grant)
+        }
+        assert!(
+            !has_foretold_grant(&def),
+            "effect-defined foretell cost must suppress GrantCastingPermission::Foretold; \
+             got: {:#?}",
+            def
+        );
+        // The chain must contain Unimplemented (honestly reflecting the gap).
+        fn has_unimplemented(def: &AbilityDefinition) -> bool {
+            if matches!(def.effect.as_ref(), Effect::Unimplemented { .. }) {
+                return true;
+            }
+            def.sub_ability.as_deref().is_some_and(has_unimplemented)
+        }
+        assert!(
+            has_unimplemented(&def),
+            "effect-defined foretell cost sentence must produce Unimplemented; \
+             got: {:#?}",
+            def
         );
     }
 
