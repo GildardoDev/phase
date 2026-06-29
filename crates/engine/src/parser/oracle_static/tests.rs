@@ -18933,6 +18933,130 @@ fn top_of_library_cast_permission_rejects_other_anchors() {
     .is_none());
 }
 
+/// CR 702.170f: Fblthp L4 — "You may plot nonland cards from the top of your
+/// library." must lower to the PERMISSION role
+/// `StaticMode::TopOfLibraryPlotPermission` (the CR 702.170f effect that lets
+/// plot function from the library), NOT the grant `TopOfLibraryHasPlot` and NOT
+/// the cast-permission family (plot is CR 702.170 Library → Exile, not CR 601.2a
+/// Library → Stack). CR 702.170f authorizes plot from a zone other than hand;
+/// the nonland filter on `affected` is this printed L4 text's own scope, not a
+/// CR 702.170f clause.
+/// Discriminating on the grant/permission split: reverting L4 to emit
+/// `TopOfLibraryHasPlot` (the grant) — re-conflating the two roles — flips this.
+#[test]
+fn top_of_library_has_plot_permission_fblthp_nonland() {
+    let def = parse_static_line("You may plot nonland cards from the top of your library.")
+        .expect("Fblthp plot-from-library permission must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::TopOfLibraryPlotPermission,
+        "L4 must be the PERMISSION role, not the grant or a cast permission, got {:?}",
+        def.mode
+    );
+    // Nonland scope rides `affected`: a `Typed` filter carrying `Non(Land)`.
+    let affected = def.affected.expect("nonland affected filter set");
+    match affected {
+        TargetFilter::Typed(tf) => {
+            assert!(
+                tf.type_filters.iter().any(|t| matches!(
+                    t,
+                    TypeFilter::Non(inner) if **inner == TypeFilter::Land
+                )),
+                "expected Non(Land) in type filters, got {:?}",
+                tf.type_filters
+            );
+        }
+        other => panic!("expected Typed nonland filter, got {other:?}"),
+    }
+}
+
+/// CR 702.170a + CR 702.170f: Fblthp L3 — "The top card of your library has
+/// plot. The plot cost is equal to its mana cost." must fully classify to the
+/// GRANT role `StaticMode::TopOfLibraryHasPlot` with `affected = Any` (the
+/// nonland scope and the permission to plot from the library are the companion
+/// L4 `TopOfLibraryPlotPermission`; the runtime requires both). The optional
+/// cost-spec second sentence is consumed (no captured field) so the whole line
+/// is owned by the static parser.
+#[test]
+fn top_of_library_has_plot_l3_full_classification() {
+    let def = parse_static_line(
+        "The top card of your library has plot. The plot cost is equal to its mana cost.",
+    )
+    .expect("Fblthp has-plot line must parse");
+    assert_eq!(def.mode, StaticMode::TopOfLibraryHasPlot);
+    assert!(
+        matches!(def.affected, Some(TargetFilter::Any)),
+        "L3 affected must be Any, got {:?}",
+        def.affected
+    );
+
+    // The bare first sentence (a hypothetical L3-only printing) also classifies.
+    let bare = parse_static_line("The top card of your library has plot.")
+        .expect("bare has-plot sentence must parse");
+    assert_eq!(bare.mode, StaticMode::TopOfLibraryHasPlot);
+}
+
+/// Cross-contamination guard: the cast-permission family must be untouched.
+/// "You may cast nonland cards from the top of your library." still lowers to
+/// `TopOfLibraryCastPermission` (Library → Stack cast), proving the plot
+/// dispatch arms (anchored on "you may plot" / "the top card ... has plot")
+/// do not steal cast lines. Reverting the categorical split (folding plot into
+/// the cast variant) flips this discriminating assertion.
+#[test]
+fn top_of_library_plot_does_not_contaminate_cast_permission() {
+    let def = parse_static_line("You may cast nonland cards from the top of your library.")
+        .expect("cast-from-top permission must still parse");
+    assert!(
+        matches!(def.mode, StaticMode::TopOfLibraryCastPermission { .. }),
+        "cast family must stay TopOfLibraryCastPermission, got {:?}",
+        def.mode
+    );
+}
+
+/// CR 702.170f reach gate: drive the FULL oracle pipeline (`parse_oracle_text`),
+/// not just the static parser in isolation, to prove Fblthp's L3/L4 are claimed
+/// by the static dispatch BEFORE the effect fallback — i.e. they are recognized
+/// statics, not `Effect::Unimplemented` GAPs. Each line must produce its
+/// role-correct static (L3 → grant `TopOfLibraryHasPlot`, L4 → permission
+/// `TopOfLibraryPlotPermission`).
+#[test]
+fn fblthp_plot_lines_classify_as_static_not_unimplemented() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::Effect;
+
+    for (line, expected_mode) in [
+        (
+            "You may plot nonland cards from the top of your library.",
+            StaticMode::TopOfLibraryPlotPermission,
+        ),
+        (
+            "The top card of your library has plot. The plot cost is equal to its mana cost.",
+            StaticMode::TopOfLibraryHasPlot,
+        ),
+    ] {
+        let parsed = parse_oracle_text(
+            line,
+            "Fblthp, Lost on the Range",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert!(
+            parsed.statics.iter().any(|d| d.mode == expected_mode),
+            "line {line:?} must produce a {expected_mode:?} static, got statics {:?}",
+            parsed.statics
+        );
+        assert!(
+            !parsed
+                .abilities
+                .iter()
+                .any(|a| matches!(*a.effect, Effect::Unimplemented { .. })),
+            "line {line:?} must not fall through to Unimplemented, got abilities {:?}",
+            parsed.abilities
+        );
+    }
+}
+
 #[test]
 fn subtype_or_list_single() {
     let f = parse_subtype_or_list("Wolf").unwrap();
