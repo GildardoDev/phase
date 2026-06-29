@@ -34670,7 +34670,7 @@ mod snapshot_tests {
         assert_eq!(*target, TargetFilter::TriggeringSource);
     }
 
-    // CR 109.4 + CR 701.21a: Morkrut Necropod's
+    // CR 701.21a: Morkrut Necropod's
     // "Whenever ~ attacks or blocks, sacrifice another creature or land" — the
     // source-exclusion "another" must land `FilterProp::Another` on the CREATURE
     // leg only. A creature is never a land, so distributing the exclusion to the

@@ -591,13 +591,12 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
 ///
 /// The numeric value of a count is the same whether the text said "a", "an",
 /// "1", "any", or "another" — all yield `QuantityExpr::Fixed { value: 1 }`. But
-/// "another" is not merely a quantity: it is the source-exclusion qualifier (CR
-/// 109.4 + CR 701.21a — the ability's own permanent is excluded from
-/// the matched population). Callers that build a target from the remainder need
-/// to re-apply that exclusion (`FilterProp::Another`) to the parsed filter, and
-/// they must distinguish the exclusion word from an ordinary article without
-/// re-matching the raw string at the call site (CLAUDE.md forbids stringly-typed
-/// dispatch). This enum is that typed signal.
+/// "another" is not merely a quantity: it is the source-exclusion qualifier.
+/// Callers that build a target from the remainder need to re-apply that
+/// exclusion (`FilterProp::Another`) to the parsed filter, and they must
+/// distinguish the exclusion word from an ordinary article without re-matching
+/// the raw string at the call site (CLAUDE.md forbids stringly-typed dispatch).
+/// This enum is that typed signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CountWord {
     /// The count word was the source-exclusion "another" — the consuming caller
@@ -625,8 +624,8 @@ pub(crate) fn parse_count_expr_with_exclusion(
 ) -> Option<(QuantityExpr, &str, CountWord)> {
     let text = text.trim_start();
     let lower = text.to_lowercase();
-    // CR 109.4 + CR 701.21a: source-exclusion "another " — implicit
-    // count of 1 that ALSO excludes the ability source from the matched set.
+    // Source-exclusion "another " — implicit count of 1 that ALSO excludes
+    // the ability source from the matched set.
     // Detected here as a typed `CountWord::SourceExclusion` so the caller can
     // re-apply `FilterProp::Another` without re-matching the string.
     if let Some(((), rest)) = super::oracle_nom::bridge::nom_on_lower(text, &lower, |i| {
