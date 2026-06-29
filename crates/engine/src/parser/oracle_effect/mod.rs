@@ -17011,8 +17011,14 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
             min: n + 1,
             max: 20,
         })
-    } else if rest == "a number" || tag::<_, _, E>("a number ").parse(rest).is_ok() {
-        // Generic "choose a number" — default range 0-20
+    } else if tag::<_, _, E>("a number").parse(rest).is_ok() {
+        // Generic "choose a number" (default range 0-20). A bare-prefix `tag`,
+        // mirroring the "a color" branch above, so a sentence-ending clause such
+        // as "As ~ enters, choose a number." parses (Squall, Gunblade Duelist,
+        // #722). The previous exact/trailing-space match dropped the period and
+        // produced no choice. The bounded "a number between" / "a number greater
+        // than" forms are consumed by the earlier branches, so this arm is reached
+        // only for a bare "a number".
         Some(ChoiceType::NumberRange { min: 0, max: 20 })
     } else if alt((tag::<_, _, E>("a land type"), tag("a nonbasic land type")))
         .parse(rest)
