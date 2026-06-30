@@ -7541,6 +7541,7 @@ pub mod tests {
         let event = GameEvent::AbilityActivated {
             player_id: PlayerId(0),
             source_id: ObjectId(1),
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
         };
         assert!(check_trigger_condition(
             &state,

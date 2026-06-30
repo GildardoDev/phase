@@ -13542,6 +13542,8 @@ pub fn handle_activate_ability(
             events.push(GameEvent::AbilityActivated {
                 player_id: player,
                 source_id,
+                // CR 606.2: Classify loyalty vs. normal from the source ability cost.
+                kind: super::planeswalker::activated_ability_kind(state, source_id, ability_index),
             });
             // CR 702.142b: Emit additional event when a boast ability is activated.
             super::casting_targets::emit_keyword_ability_event_if_tagged(
@@ -13653,6 +13655,8 @@ pub fn handle_activate_ability(
     events.push(GameEvent::AbilityActivated {
         player_id: player,
         source_id,
+        // CR 606.2: Classify loyalty vs. normal from the source ability cost.
+        kind: super::planeswalker::activated_ability_kind(state, source_id, ability_index),
     });
     // CR 702.142b: Emit additional event when a boast ability is activated.
     super::casting_targets::emit_keyword_ability_event_if_tagged(
