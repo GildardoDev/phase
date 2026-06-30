@@ -4945,6 +4945,17 @@ pub enum PlayerFilter {
     },
     /// All players.
     All,
+    /// CR 608.2c + CR 109.4 + CR 608.2h: All non-eliminated players except those
+    /// matching `exclude`. The iteration-axis analogue of
+    /// `PlayerScope::AllPlayers { exclude }` (the quantity axis): the exclusion
+    /// anchor is itself a `PlayerFilter`, composing the enum with itself so
+    /// "each player other than its controller" parses to
+    /// `exclude: ParentObjectTargetController` and any future "each player other
+    /// than ⟨ref⟩" reuses the same variant. When the anchor object has left the
+    /// battlefield (e.g. the exiled permanent of Fractured Identity), the anchor
+    /// is resolved with last-known information (CR 608.2h). `Box` breaks the
+    /// enum's self-referential size cycle.
+    AllExcept { exclude: Box<PlayerFilter> },
     /// CR 702.179f: Each player whose speed is tied for the highest speed among players.
     HighestSpeed,
     /// "each player who [verb]ed a card this way" — scoped to players who owned objects
@@ -4973,6 +4984,17 @@ pub enum PlayerFilter {
     /// event clause. Falls back to plain `Opponent` semantics when no trigger
     /// event is in scope (i.e. only excludes the controller).
     OpponentOtherThanTriggering,
+    /// CR 102.2 + CR 603.2 + CR 608.2d: Each opponent of the *triggering* player
+    /// (the caster of the spell that fired the trigger), resolved live from
+    /// `state.current_trigger_event` via `extract_player_from_event`. Models
+    /// "each of that player's opponents [may] <effect>" (Heartwood Storyteller) —
+    /// "that player" is the triggering/casting player, NOT the source's controller.
+    /// The recipient SET is fanned out per-player by the standard `player_scope`
+    /// loop; the body recipient stays `Controller`, rebound per opponent. CR 102.2
+    /// two-player opponent (`p.id != caster`); CR 102.3 teams intentionally not
+    /// modeled (mirrors `Opponent`). Fails closed (no recipient, count 0) when no
+    /// trigger event is in scope — the caster anchor is undefined without it.
+    OpponentOfTriggeringPlayer,
     /// CR 506.2 + CR 508.6 + CR 603.4: Each opponent of the *triggering/attacking*
     /// player (resolved from the active AttackersDeclared trigger event) who is NOT
     /// in that player's attacked-this-combat set. Models "that player has another
