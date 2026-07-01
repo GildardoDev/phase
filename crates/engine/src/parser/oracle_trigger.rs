@@ -10523,9 +10523,9 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
         def.batched = true;
         // CR 113.6 / CR 113.6b: a permanent's triggered ability functions only on the
         // battlefield unless it states otherwise, so this batched "leave your graveyard"
-        // trigger keeps make_base()'s battlefield-only default. CR 603.10a: only a
-        // self-referential leaves trigger (the source is itself the object leaving its
-        // own graveyard) needs the graveyard/exile look-back zones.
+        // trigger keeps make_base()'s battlefield-only default. CR 113.6k + CR 603.10a:
+        // when the source card is itself the object leaving its own graveyard, the trigger
+        // condition cannot trigger from the battlefield and needs graveyard/exile zones.
         if filter_references_self(&scoped) {
             def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
         }
