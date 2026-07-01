@@ -10519,10 +10519,17 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZoneAll;
         def.origin = Some(Zone::Graveyard);
-        def.valid_card = Some(with_owner_scope(filter, ControllerRef::You));
+        let scoped = with_owner_scope(filter, ControllerRef::You);
         def.batched = true;
-        // LTB-from-graveyard triggers need to fire from graveyard zone context
-        def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
+        // CR 113.6 / CR 113.6b: a permanent's triggered ability functions only on the
+        // battlefield unless it states otherwise, so this batched "leave your graveyard"
+        // trigger keeps make_base()'s battlefield-only default. CR 603.10a: only a
+        // self-referential leaves trigger (the source is itself the object leaving its
+        // own graveyard) needs the graveyard/exile look-back zones.
+        if filter_references_self(&scoped) {
+            def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
+        }
+        def.valid_card = Some(scoped);
         if during_your_turn {
             def.constraint = Some(TriggerConstraint::OnlyDuringYourTurn);
         }
@@ -10591,10 +10598,12 @@ fn try_parse_one_or_more_put_into_exile_from(
         def.origin_zones = zones;
         def.destination = Some(Zone::Exile);
         def.batched = true;
-        // Source can fire from any public zone context since cards move from
-        // library/graveyard — trigger source (e.g. Laelia) is on the battlefield,
-        // but keeping these zones mirrors the leave-graveyard precedent.
-        def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
+        // CR 113.6 / CR 113.6b: this batched "cards are put into exile from
+        // library/graveyard" ability is a permanent's triggered ability whose source
+        // (e.g. Laelia the Blade Reforged, Rakshasa Vizier) is on the battlefield, and
+        // it doesn't state that it functions from any other zone — so it keeps
+        // make_base()'s battlefield-only default. There is no self-referential subject
+        // here (valid_card is None), so no graveyard/exile look-back zones are needed.
         return Some((TriggerMode::ChangesZoneAll, def));
     }
 
