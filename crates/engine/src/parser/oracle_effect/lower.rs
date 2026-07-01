@@ -7041,7 +7041,12 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     // Restricted to the mana-value property only (CR 202.3), never power /
     // toughness.
     if is_that_card_mana_value_where_x(expression_lower.as_str()) {
-        return parse_event_context_quantity(where_x_expression);
+        // Pass the already-trimmed `expression` (trailing `.` stripped at the top
+        // of this fn), not the raw `where_x_expression`: the guard matches the
+        // trimmed phrase, so a punctuation-bearing input like "that card's mana
+        // value." must resolve through the same trimmed text or the demonstrative
+        // binding would fall back to `None` and the bug would survive.
+        return parse_event_context_quantity(expression);
     }
     // CDA-quantity classification takes precedence: it is the more specific
     // where-X interpreter (object counts, "that spell's mana value",
@@ -9311,6 +9316,17 @@ mod where_x_tests {
         // CR 202.3 synonym: "converted mana cost" routes identically.
         assert_eq!(
             parse_where_x_quantity_expression("that card's converted mana cost"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Demonstrative,
+                },
+            })
+        );
+        // Trailing sentence punctuation must resolve identically — the guard
+        // matches the trimmed phrase, so the demonstrative binding must be built
+        // from the trimmed text, not the raw "that card's mana value." input.
+        assert_eq!(
+            parse_where_x_quantity_expression("that card's mana value."),
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::ObjectManaValue {
                     scope: ObjectScope::Demonstrative,
