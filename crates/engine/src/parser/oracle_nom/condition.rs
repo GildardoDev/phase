@@ -1407,9 +1407,22 @@ fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         // Not(SourceHasDealtDamage). Specific full-phrase tag; placed before the
         // generic predicates so it is not shadowed.
         parse_source_hasnt_dealt_damage,
-        // CR 400.7: Entered this turn — subject × predicate, class-general over
-        // every self-referential subject ("it"/"~"/"this creature"/…).
-        parse_source_entered_this_turn,
+        // CR 400.7: Entered this turn.
+        // Accept both the long "entered the battlefield this turn" and the abbreviated
+        // "entered this turn" forms — Oracle templates vary between them for the same
+        // semantic. Longer tag first so the shorter one doesn't shadow it. Only the
+        // `~`-normalized subject is accepted context-free; bare "it entered this turn"
+        // is deliberately NOT matched here (for an attached-subject static "it" binds
+        // the enchanted/equipped creature, not the source). The self-referential
+        // bound-pronoun form is handled by `rewrite_self_pronoun_subject` on the
+        // SelfRef static path (see oracle_static/anthem.rs).
+        value(
+            StaticCondition::SourceEnteredThisTurn,
+            alt((
+                tag("~ entered the battlefield this turn"),
+                tag("~ entered this turn"),
+            )),
+        ),
         parse_this_type_entered_this_turn,
         // CR 708.2: "enchanted creature is face down" — the attached-to creature is face-down.
         value(
@@ -1714,26 +1727,6 @@ fn parse_source_is_type(input: &str) -> OracleResult<'_, StaticCondition> {
         condition
     };
     Ok((remainder, condition))
-}
-
-/// CR 400.7: Parse "<subject> entered (the battlefield) this turn" →
-/// SourceEnteredThisTurn. Composes `parse_self_source_subject` (which accepts
-/// every self-referential subject — "it ", "~ ", "this creature ", etc.) with
-/// the entered predicate, so the bound-pronoun "it entered this turn" form
-/// (Crew Captain's indestructible gate, Drownyard Behemoth's hexproof gate,
-/// Thrasta, Zurgo and Ojutai) resolves to the same gate as the canonical
-/// "~ entered ..." templating. Longer "entered the battlefield this turn" tag
-/// first so the abbreviated "entered this turn" form doesn't shadow it.
-fn parse_source_entered_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = parse_self_source_subject(input)?;
-    value(
-        StaticCondition::SourceEnteredThisTurn,
-        alt((
-            tag("entered the battlefield this turn"),
-            tag("entered this turn"),
-        )),
-    )
-    .parse(rest)
 }
 
 /// CR 400.7: Parse "this [type] entered (the battlefield) this turn" → SourceEnteredThisTurn.
@@ -9045,25 +9038,17 @@ mod tests {
         assert_eq!(c, StaticCondition::SourceEnteredThisTurn);
     }
 
-    // CR 400.7: bound-pronoun "it entered this turn" (Crew Captain's
-    // indestructible gate, Drownyard Behemoth's hexproof gate, Thrasta, Zurgo
-    // and Ojutai) binds the static's source. Before the subject was normalized
-    // through `parse_self_source_subject` this dropped to Unrecognized; it must
-    // now resolve to the same gate as the "~ entered ..." templating.
+    // CR 400.7: bare "it entered this turn" is deliberately NOT matched
+    // context-free. For an attached-subject static (an Aura/Equipment) "it"
+    // binds the enchanted/equipped creature, not the source, so accepting it
+    // here would turn an honest gap into wrong coverage. The self-referential
+    // bound-pronoun form is rewritten to "~ entered ..." on the SelfRef static
+    // path (`rewrite_self_pronoun_subject`, oracle_static/anthem.rs) before it
+    // reaches this grammar.
     #[test]
-    fn test_it_entered_this_turn() {
-        let (rest, c) = parse_inner_condition("it entered this turn").unwrap();
-        assert_eq!(rest, "");
-        assert_eq!(c, StaticCondition::SourceEnteredThisTurn);
-    }
-
-    // CR 400.7: the bound-pronoun subject also accepts the long "entered the
-    // battlefield this turn" form (no regression on the longest-match arm).
-    #[test]
-    fn test_it_entered_battlefield_this_turn() {
-        let (rest, c) = parse_inner_condition("it entered the battlefield this turn").unwrap();
-        assert_eq!(rest, "");
-        assert_eq!(c, StaticCondition::SourceEnteredThisTurn);
+    fn test_bare_it_entered_this_turn_not_matched_context_free() {
+        assert!(parse_inner_condition("it entered this turn").is_err());
+        assert!(parse_inner_condition("it entered the battlefield this turn").is_err());
     }
 
     // CR 708.2: Unable to Scream — attached-to creature face-down gate.
