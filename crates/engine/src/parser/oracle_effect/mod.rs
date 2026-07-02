@@ -134,8 +134,9 @@ use self::search::{
 };
 use self::sequence::{
     apply_clause_continuation, clause_is_dig_lookback_transparent, continuation_absorbs_current,
-    parse_followup_continuation_ast, parse_intrinsic_continuation_ast, split_clause_sequence,
-    try_parse_repeat_process_for_keywords, try_parse_same_is_true_continuation,
+    effect_wraps_copy_spell, parse_followup_continuation_ast, parse_intrinsic_continuation_ast,
+    recognize_copy_retarget_clause, split_clause_sequence, try_parse_repeat_process_for_keywords,
+    try_parse_same_is_true_continuation,
 };
 use self::subject::{
     try_parse_each_deals_damage_equal_to_power, try_parse_subject_predicate_ast,
@@ -23023,6 +23024,28 @@ pub(crate) fn parse_effect_chain_ir(
                         ) => Some(continuation),
                         _ => None,
                     }
+                })
+            })
+            .or_else(|| {
+                // CR 707.10c + CR 608.2c: "You may choose new targets for the
+                // copy" split from its CopySpell antecedent by an intervening
+                // rider clause — "... then return it to its owner's hand"
+                // (Narset's Reversal) or "those spells gain wither"
+                // (Spinerock's). The nearest non-absorbed effect is the rider,
+                // not the copy, so the direct recognizer above misses it.
+                // The strict copy-retarget phrase gate is the guard; only bind
+                // the continuation when a deeper non-absorbed clause actually
+                // wraps a CopySpell (apply_clause_continuation's backward scan
+                // then patches that copy). Cards whose retarget phrase carries
+                // an "If you do," condition prefix (Spider-Man Across the
+                // Spider-Verse) fail the strict phrase gate and stay honestly
+                // gapped — that is a distinct condition-prefixed root cause.
+                if !recognize_copy_retarget_clause(&normalized_text.to_lowercase()) {
+                    return None;
+                }
+                non_absorbed.iter().skip(1).find_map(|c| {
+                    effect_wraps_copy_spell(&effective_effect_of(c))
+                        .then_some(ContinuationAst::CopyMayRetarget)
                 })
             });
         let absorb_followup = followup_continuation

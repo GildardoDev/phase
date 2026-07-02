@@ -2685,7 +2685,7 @@ pub(super) fn push_clause_chunk(
 /// spell / triggered contexts) or nested inside a `CreateDelayedTrigger`
 /// wrapper ("When you next cast ..., copy that spell"). Mirrors
 /// `def_tree_has_optional`'s descent through `CreateDelayedTrigger`.
-fn effect_wraps_copy_spell(effect: &Effect) -> bool {
+pub(super) fn effect_wraps_copy_spell(effect: &Effect) -> bool {
     match effect {
         Effect::CopySpell { .. } => true,
         Effect::CreateDelayedTrigger { effect: inner, .. } => {
@@ -2999,16 +2999,26 @@ pub(super) fn apply_clause_continuation(
             }
         }
         ContinuationAst::CopyMayRetarget => {
-            // CR 707.10c: patch the preceding CopySpell — descending through a
+            // CR 707.10c: patch the reachable CopySpell — descending through a
             // CreateDelayedTrigger wrapper ("When you next cast ..., copy that
             // spell" — Galvanic Iteration) and through the sub-ability chain
             // ("That player may copy this spell ..." — the Chain cycle, where
             // the optional CopySpell is nested under the parent discard).
-            if let Some(previous) = defs.last_mut() {
-                set_copy_retarget_in_ability(
+            //
+            // CR 608.2c: when a rider clause splits the copy from this retarget
+            // clause ("... then return it to its owner's hand" — Narset's
+            // Reversal; "those spells gain wither" — Spinerock's), `defs.last`
+            // is the intervening rider, not the copy. Scan backward for the
+            // nearest copy-bearing def and patch THAT one; a def with no
+            // reachable CopySpell returns false and is skipped (honest
+            // fallthrough — never patch a non-copy rider).
+            for previous in defs.iter_mut().rev() {
+                if set_copy_retarget_in_ability(
                     previous,
                     &CopyRetargetPermission::MayChooseNewTargets,
-                );
+                ) {
+                    break;
+                }
             }
         }
         ContinuationAst::SuspectLastCreated => {
