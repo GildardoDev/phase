@@ -7087,6 +7087,29 @@ fn static_same_turn_loyalty_abilities_activate_as_instant() {
     assert_eq!(def.condition, Some(StaticCondition::SourceEnteredThisTurn));
 }
 
+// CR 400.7: Crew Captain — "This creature has indestructible as long as it
+// entered this turn." The bound-pronoun "it entered this turn" gate binds the
+// static's source; previously it dropped to Unrecognized because "it" was never
+// normalized to the "~ entered ..." templating the entered-this-turn arm
+// hardcoded. Generalizes to Drownyard Behemoth (hexproof), Thrasta, and Zurgo
+// and Ojutai. The abbreviated "it entered this turn" form must resolve to the
+// existing SourceEnteredThisTurn gate.
+#[test]
+fn static_indestructible_as_long_as_it_entered_this_turn() {
+    let def =
+        parse_static_line("This creature has indestructible as long as it entered this turn.")
+            .unwrap();
+    assert_eq!(def.condition, Some(StaticCondition::SourceEnteredThisTurn));
+
+    // Same "it entered this turn" gate on the hexproof shape shared by
+    // Drownyard Behemoth, Thrasta, Tempest's Roar, and Zurgo and Ojutai.
+    let hexproof = parse_static_line("~ has hexproof as long as it entered this turn.").unwrap();
+    assert_eq!(
+        hexproof.condition,
+        Some(StaticCondition::SourceEnteredThisTurn)
+    );
+}
+
 #[test]
 fn static_cards_in_graveyards_lose_all_abilities() {
     let def = parse_static_line("Cards in graveyards lose all abilities.").unwrap();
